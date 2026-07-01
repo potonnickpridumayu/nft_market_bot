@@ -3,6 +3,7 @@ import hmac
 import hashlib
 import json
 import os
+import re
 import asyncio
 import urllib.request
 from typing import Optional
@@ -73,6 +74,47 @@ def get_user_from_header(x_telegram_init_data: str = "") -> Optional[dict]:
     return verify_telegram_data(x_telegram_init_data)
 
 
+# ── Парсинг Telegram-подарка ───────────────────────────────────────────────────
+
+TELEGRAM_GIFT_RE = re.compile(r"t\.me/nft/([^/?#\s]+)", re.IGNORECASE)
+
+
+def parse_gift_url(url: str) -> Optional[dict]:
+    """Из ссылки вида https://t.me/nft/SakuraFlower-33824 достаём
+    коллекцию ("Sakura Flower"), номер ("#33824") и слаг."""
+    m = TELEGRAM_GIFT_RE.search((url or "").strip())
+    if not m:
+        return None
+    slug = m.group(1)  # напр. "SakuraFlower-33824"
+    if "-" in slug:
+        name_part, num = slug.rsplit("-", 1)
+    else:
+        name_part, num = slug, ""
+    # CamelCase -> "Camel Case"
+    collection = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name_part).strip() or name_part
+    number = f"#{num}" if num.isdigit() else ""
+    return {"slug": slug, "collection": collection, "number": number}
+
+
+def fetch_gift_meta(url: str) -> dict:
+    """Best-effort: тянем og:title и og:image со страницы подарка.
+    Никогда не роняет создание лота — при любой ошибке возвращаем {}."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        html = urllib.request.urlopen(req, timeout=8).read().decode("utf-8", "ignore")
+
+        def og(prop: str) -> str:
+            mm = re.search(
+                r'<meta[^>]+property=["\']og:' + prop + r'["\'][^>]+content=["\']([^"\']+)["\']',
+                html, re.IGNORECASE,
+            )
+            return mm.group(1) if mm else ""
+
+        return {"title": og("title"), "image": og("image")}
+    except Exception:
+        return {}
+
+
 async def notify_seller(seller_id: int, text: str):
     """Best-effort уведомление продавцу в Telegram. Не роняет покупку при сбое.
 
@@ -126,7 +168,8 @@ async def listing_detail(listing_id: int):
 
 
 class CreateListingBody(BaseModel):
-    gift_id: int
+    # Теперь принимаем ссылку на подарок из Telegram, а не числовой gift_id.
+    gift_url: str
     price: float
     description: str = ""
 
@@ -139,13 +182,50 @@ async def create_listing_endpoint(
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
         raise HTTPException(401, "Unauthorized")
+
+    if body.price <= 0:
+        raise HTTPException(400, "Price must be greater than 0")
+
+    parsed = parse_gift_url(body.gift_url)
+    if not parsed:
+        raise HTTPException(400, "Invalid gift link. Expected t.me/nft/...")
+
+    # Продавец мог открыть Mini App, не нажимая /start в боте —
+    # гарантируем, что он есть в users (иначе FK на owner_id упадёт).
+    full_name = " ".join(
+        p for p in [user.get("first_name"), user.get("last_name")] if p
+    )
+    await get_or_create_user(user["id"], user.get("username", ""), full_name)
+
+    # Метаданные подарка (картинка/имя) — best-effort, не критично для лота.
+    meta = await asyncio.to_thread(fetch_gift_meta, body.gift_url)
+    raw_title = (meta.get("title") or "").strip()
+    if raw_title:
+        # убираем возможный хвост "#33824", чтобы не дублировать номер в карточке
+        gift_name = re.sub(r"\s*#?\d+\s*$", "", raw_title).strip() or raw_title
+    else:
+        gift_name = parsed["collection"] or parsed["slug"]
+    image_url = meta.get("image", "")
+
+    # Создаём запись о подарке во владении продавца…
+    gift_id = await add_gift(
+        owner_id=user["id"],
+        collection_name=parsed["collection"],
+        gift_name=gift_name,
+        gift_number=parsed["number"],
+        rarity="Common",           # реальную редкость Telegram-ссылка не отдаёт
+        image_url=image_url,
+        nft_address=parsed["slug"],
+    )
+
+    # …и уже потом сам листинг в TON.
     listing_id = await create_listing(
-        gift_id=body.gift_id,
+        gift_id=gift_id,
         seller_id=user["id"],
         price_ton=body.price,
         description=body.description,
     )
-    return {"ok": True, "listing_id": listing_id}
+    return {"ok": True, "listing_id": listing_id, "gift_id": gift_id, "gift_name": gift_name}
 
 
 @app.post("/api/listings/{listing_id}/buy")

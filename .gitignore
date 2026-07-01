@@ -1,4 +1,4 @@
 .env 
 *.db
 __pycache__/
-venv/
+venv/cloudflared.exe.exe 

@@ -179,6 +179,17 @@ async def cancel_listing(listing_id: int):
     finally:
         await db.close()
 
+async def mark_listing_sold(listing_id: int):
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE listings SET status='sold', sold_at=datetime('now') WHERE listing_id=?",
+            (listing_id,)
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
 
 async def increment_views(listing_id: int):
     db = await get_db()

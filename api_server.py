@@ -9,6 +9,8 @@ import urllib.request
 from typing import Optional
 from urllib.parse import parse_qsl
 
+from contextlib import asynccontextmanager
+from db.queries import init_db, close_pool
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -34,8 +36,13 @@ try:
 except Exception:
     MARKET_FEE = float(os.getenv("MARKET_FEE", "0.03"))
     REFERRAL_BONUS_PERCENT = float(os.getenv("REFERRAL_BONUS_PERCENT", "0"))
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()      # создаёт таблицы, если их нет
+    yield
+    await close_pool()
 
-app = FastAPI(title="GiftSafe API")
+app = FastAPI(title="GiftSafe API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

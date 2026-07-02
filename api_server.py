@@ -38,7 +38,7 @@ try:
 except Exception:
     MARKET_FEE = float(os.getenv("MARKET_FEE", "0.03"))
     REFERRAL_BONUS_PERCENT = float(os.getenv("REFERRAL_BONUS_PERCENT", "0"))
-@asynccontextmanager
+    
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()

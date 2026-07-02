@@ -5,6 +5,7 @@ import json
 import os
 import re
 import asyncio
+import ton_client
 import urllib.request
 from typing import Optional
 from urllib.parse import parse_qsl
@@ -378,6 +379,10 @@ async def profile(x_telegram_init_data: Optional[str] = Header(None)):
 @app.get("/api/stats")
 async def stats():
     return await get_platform_stats()
+
+@app.get("/api/escrow/status")
+async def escrow_status():
+    return await ton_client.get_escrow_snapshot()
 
 
 if __name__ == "__main__":

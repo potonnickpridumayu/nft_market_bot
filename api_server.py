@@ -6,6 +6,7 @@ import os
 import re
 import asyncio
 import ton_client
+import deposits
 import urllib.request
 from typing import Optional
 from urllib.parse import parse_qsl
@@ -24,7 +25,7 @@ from db.queries import (
     get_user_transactions, get_platform_stats,
     # для покупки:
     update_balance, transfer_gift, record_transaction,
-    record_referral_payout, mark_listing_sold,
+    record_referral_payout, mark_listing_sold,get_or_create_deposit_intent, get_latest_intent_for_user,
 )
 
 load_dotenv()
@@ -38,9 +39,12 @@ except Exception:
     MARKET_FEE = float(os.getenv("MARKET_FEE", "0.03"))
     REFERRAL_BONUS_PERCENT = float(os.getenv("REFERRAL_BONUS_PERCENT", "0"))
 @asynccontextmanager
+@asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()      # создаёт таблицы, если их нет
+    await init_db()
+    poller = asyncio.create_task(deposits.poll_loop())
     yield
+    poller.cancel()
     await close_pool()
 
 app = FastAPI(title="GiftSafe API", lifespan=lifespan)
@@ -384,6 +388,48 @@ async def stats():
 async def escrow_status():
     return await ton_client.get_escrow_snapshot()
 
+
+@app.post("/api/escrow/deposit-intent")
+async def create_deposit_intent_endpoint(
+        x_telegram_init_data: Optional[str] = Header(None),
+):
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Unauthorized")
+    if not ton_client.is_configured():
+        raise HTTPException(503, "Escrow wallet is not configured")
+
+    full_name = " ".join(
+        p for p in [user.get("first_name"), user.get("last_name")] if p
+    )
+    await get_or_create_user(user["id"], user.get("username", ""), full_name)
+
+    intent = await get_or_create_deposit_intent(user["id"])
+    return {
+        "ok": True,
+        "address": ton_client.TON_WALLET_ADDRESS,
+        "code": intent["code"],
+        "network": ton_client.TON_NETWORK,
+        "instructions": "Отправьте NFT на этот адрес, указав код в комментарии к переводу.",
+    }
+
+
+@app.get("/api/escrow/deposit-intent")
+async def deposit_intent_status(
+        x_telegram_init_data: Optional[str] = Header(None),
+):
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Unauthorized")
+    intent = await get_latest_intent_for_user(user["id"])
+    if not intent:
+        return {"status": "none"}
+    return {
+        "status": intent["status"],  # pending / completed
+        "code": intent["code"],
+        "gift_id": intent["gift_id"],
+        "nft_address": intent["nft_address"],
+    }
 
 if __name__ == "__main__":
     import uvicorn

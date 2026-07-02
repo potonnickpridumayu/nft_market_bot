@@ -7,9 +7,11 @@
 """
 import os
 import logging
+import secrets
 from typing import Optional
 
 import asyncpg
+
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,26 @@ async def get_pool() -> asyncpg.Pool:
 # DOUBLE PRECISION для сумм — чтобы код продолжал работать с float (а не Decimal).
 
 SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS deposit_intents (
+    intent_id    BIGSERIAL PRIMARY KEY,
+    user_id      BIGINT REFERENCES users(user_id),
+    code         TEXT UNIQUE NOT NULL,          -- уникальный комментарий, напр. GS-12345-A7F3
+    status       TEXT NOT NULL DEFAULT 'pending', -- pending/completed/expired
+    nft_address  TEXT,                          -- адрес пришедшего NFT (после депозита)
+    gift_id      BIGINT REFERENCES gifts(gift_id),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);
+ 
+CREATE TABLE IF NOT EXISTS escrow_events (
+    event_id     BIGSERIAL PRIMARY KEY,
+    tx_hash      TEXT UNIQUE NOT NULL,          -- защита от повторной обработки транзакции
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ 
+CREATE INDEX IF NOT EXISTS idx_intents_status ON deposit_intents(status);
+CREATE INDEX IF NOT EXISTS idx_intents_user   ON deposit_intents(user_id);
+
 CREATE TABLE IF NOT EXISTS users (
     user_id       BIGINT PRIMARY KEY,
     username      TEXT,
@@ -432,3 +454,66 @@ async def get_platform_stats() -> dict:
         "total_volume": float(volume or 0),
         "total_fees": float(fees or 0),
     }
+
+
+async def get_or_create_deposit_intent(user_id: int) -> dict:
+    """Выдаёт продавцу код депозита. Если pending-intent уже есть — возвращает его же,
+    чтобы у одного юзера не плодились коды."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT * FROM deposit_intents WHERE user_id=$1 AND status='pending'",
+        user_id,
+    )
+    if row:
+        return dict(row)
+    code = f"GS-{user_id}-{secrets.token_hex(2).upper()}"
+    row = await pool.fetchrow(
+        """INSERT INTO deposit_intents (user_id, code)
+           VALUES ($1,$2) RETURNING *""",
+        user_id, code,
+    )
+    return dict(row)
+
+
+async def get_pending_intent_by_code(code: str) -> Optional[dict]:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT * FROM deposit_intents WHERE code=$1 AND status='pending'",
+        code,
+    )
+    return dict(row) if row else None
+
+
+async def complete_deposit_intent(intent_id: int, nft_address: str, gift_id: int):
+    pool = await get_pool()
+    await pool.execute(
+        """UPDATE deposit_intents
+           SET status='completed', nft_address=$1, gift_id=$2, completed_at=NOW()
+           WHERE intent_id=$3""",
+        nft_address, gift_id, intent_id,
+    )
+
+
+async def is_event_processed(tx_hash: str) -> bool:
+    pool = await get_pool()
+    return bool(await pool.fetchval(
+        "SELECT 1 FROM escrow_events WHERE tx_hash=$1", tx_hash
+    ))
+
+
+async def mark_event_processed(tx_hash: str):
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO escrow_events (tx_hash) VALUES ($1) ON CONFLICT DO NOTHING",
+        tx_hash,
+    )
+
+async def get_latest_intent_for_user(user_id: int) -> Optional[dict]:
+    """Последний intent юзера — для опроса статуса депозита с фронта."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """SELECT * FROM deposit_intents WHERE user_id=$1
+           ORDER BY created_at DESC LIMIT 1""",
+        user_id,
+    )
+    return dict(row) if row else None

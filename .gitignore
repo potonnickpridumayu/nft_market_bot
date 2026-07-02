@@ -2,3 +2,5 @@
 *.db
 __pycache__/
 venv/cloudflared.exe.exe 
+mint_test_nft.py
+.mint_state.json

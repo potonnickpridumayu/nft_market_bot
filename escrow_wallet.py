@@ -58,6 +58,7 @@ async def send_nft(nft_address: str, to_address: str, comment: str | None = None
         response_address=wallet.address,  # сдача с газа — обратно на сейф
         forward_payload=comment,          # комментарий получателю (или None)
         forward_amount=1,                 # 1 нанотон — стандарт для нотификации
+        bounce=True,  # при фейле ончейн газ вернётся на сейф
     )
     ext = await wallet.transfer_message(builder)
     logger.info("📤 NFT %s отправлен на %s", nft_address, to_address)

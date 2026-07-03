@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS referral_payouts (
 
 ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'processed';
 ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE deposit_intents ADD COLUMN IF NOT EXISTS from_address TEXT;
 """
 
 
@@ -486,13 +487,15 @@ async def get_pending_intent_by_code(code: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
-async def complete_deposit_intent(intent_id: int, nft_address: str, gift_id: int):
+async def complete_deposit_intent(intent_id: int, nft_address: str, gift_id: int,
+                                  from_address: str = ""):
     pool = await get_pool()
     await pool.execute(
         """UPDATE deposit_intents
-           SET status='completed', nft_address=$1, gift_id=$2, completed_at=NOW()
+           SET status='completed', nft_address=$1, gift_id=$2,
+               from_address=$4, completed_at=NOW()
            WHERE intent_id=$3""",
-        nft_address, gift_id, intent_id,
+        nft_address, gift_id, intent_id, from_address,
     )
 
 

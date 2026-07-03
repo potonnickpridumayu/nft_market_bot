@@ -111,7 +111,10 @@ async def process_incoming_transfers() -> None:
                 image_url=meta.get("image", ""),
                 nft_address=nft_address,
             )
-            await complete_deposit_intent(intent["intent_id"], nft_address, gift_id)
+            await complete_deposit_intent(
+                intent["intent_id"], nft_address, gift_id,
+                from_address=t.get("old_owner") or "",
+            )
             await mark_event_processed(tx_hash, "completed")
             logger.info(
                 "✅ Депозит: NFT %s → user %s (gift_id=%s, code=%s)",

@@ -23,7 +23,11 @@ _pool: Optional[asyncpg.Pool] = None
 async def debug_all_gifts():
     pool = await get_pool()
     rows = await pool.fetch("SELECT * FROM gifts")
-    return [{k: str(v) for k, v in dict(r).items()} for r in rows]
+    listings = await pool.fetch("SELECT * FROM listings")
+    return {
+        "gifts": [{k: str(v) for k, v in dict(r).items()} for r in rows],
+        "listings": [{k: str(v) for k, v in dict(r).items()} for r in listings],
+    }
 
 async def get_pool() -> asyncpg.Pool:
     global _pool

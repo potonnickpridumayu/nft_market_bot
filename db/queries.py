@@ -22,10 +22,12 @@ _pool: Optional[asyncpg.Pool] = None
 
 async def debug_all_gifts():
     pool = await get_pool()
-    rows = await pool.fetch("SELECT * FROM gifts")
+    await pool.execute("DELETE FROM listings WHERE listing_id IN (1, 2)")
+    await pool.execute("DELETE FROM gifts WHERE gift_id IN (1, 2, 3)")
+    gifts = await pool.fetch("SELECT * FROM gifts")
     listings = await pool.fetch("SELECT * FROM listings")
     return {
-        "gifts": [{k: str(v) for k, v in dict(r).items()} for r in rows],
+        "gifts": [{k: str(v) for k, v in dict(r).items()} for r in gifts],
         "listings": [{k: str(v) for k, v in dict(r).items()} for r in listings],
     }
 

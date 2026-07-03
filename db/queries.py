@@ -20,6 +20,12 @@ logger = logging.getLogger(__name__)
 
 _pool: Optional[asyncpg.Pool] = None
 
+async def debug_all_gifts():
+    pool = await get_pool()   # или как там получается соединение у соседних функций
+    rows = await pool.fetch(
+        "SELECT id, owner_id, name, status, nft_address FROM gifts ORDER BY id"
+    )
+    return [dict(r) for r in rows]
 
 async def get_pool() -> asyncpg.Pool:
     global _pool

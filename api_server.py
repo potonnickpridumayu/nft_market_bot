@@ -180,6 +180,12 @@ async def listings(
                                        collection=collection, max_price=max_price)
     return {"listings": items, "total": len(items)}
 
+@app.get("/api/debug/gifts")
+async def debug_gifts():
+    rows = await pool.fetch(
+        "SELECT id, owner_id, name, status, nft_address FROM gifts ORDER BY id"
+    )
+    return [dict(r) for r in rows]
 
 @app.get("/api/listings/{listing_id}")
 async def listing_detail(listing_id: int):

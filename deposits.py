@@ -23,6 +23,7 @@ from db.queries import (
     touch_unmatched_event,
     get_gift_by_nft_address,
     transfer_gift,
+    update_balance,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,73 @@ GRACE_PERIOD = 30 * 60  # сек: сколько ждём матча несма�
 POLL_INTERVAL = 15   # секунд между проверками
 BATCH_LIMIT = 20     # сколько последних трансферов смотрим за раз
 
+DEPOSIT_PREFIX = "GS-DEP-"
+MIN_DEPOSIT_TON = 0.05  # отсечка от пыли и случайных переводов
+
+
+def decode_tx_comment(tx: dict) -> str | None:
+    """Текстовый комментарий из обычного входящего TON-перевода."""
+    in_msg = tx.get("in_msg") or {}
+    content = in_msg.get("message_content") or {}
+    decoded = content.get("decoded")
+    if isinstance(decoded, dict):
+        c = decoded.get("comment")
+        if isinstance(c, str):
+            return c.strip()
+    body_b64 = content.get("body")
+    if not body_b64:
+        return None
+    try:
+        cell = Cell.one_from_boc(base64.b64decode(body_b64))
+        cs = cell.begin_parse()
+        if cs.load_uint(32) != 0:
+            return None
+        return cs.load_snake_string().strip()
+    except Exception:
+        return None
+
+
+async def process_ton_deposits() -> None:
+    """Один проход: входящие TON-переводы с кодом GS-DEP-<user_id> → баланс."""
+    data = await ton_client._get(
+        "/transactions",
+        {
+            "account": ton_client.TON_WALLET_ADDRESS,
+            "limit": BATCH_LIMIT,
+            "offset": 0,
+            "sort": "desc",
+        },
+    )
+    for tx in data.get("transactions") or []:
+        tx_hash = tx.get("hash") or ""
+        if not tx_hash or await is_event_processed(tx_hash):
+            continue
+
+        in_msg = tx.get("in_msg") or {}
+        value_nano = int(in_msg.get("value") or 0)
+        comment = decode_tx_comment(tx)
+
+        # не наш формат / нет комментария / пыль — молча пропускаем навсегда
+        if not comment or not comment.startswith(DEPOSIT_PREFIX):
+            await mark_event_processed(tx_hash, "not_deposit")
+            continue
+
+        amount_ton = value_nano / 1_000_000_000
+        try:
+            user_id = int(comment.removeprefix(DEPOSIT_PREFIX))
+        except ValueError:
+            await mark_event_processed(tx_hash, "bad_deposit_code")
+            logger.warning("⛔ Битый код пополнения: %r (tx=%s)", comment, tx_hash)
+            continue
+
+        if amount_ton < MIN_DEPOSIT_TON:
+            await mark_event_processed(tx_hash, "deposit_dust")
+            logger.warning("⛔ Пополнение ниже минимума: %s TON от user %s", amount_ton, user_id)
+            continue
+
+        await update_balance(user_id, amount_ton)
+        await mark_event_processed(tx_hash, "ton_deposit")
+        logger.info("💰 Пополнение: +%s TON → user %s (tx=%s)", amount_ton, user_id, tx_hash)
 
 def decode_comment(transfer: dict) -> str | None:
     """Достаём текстовый комментарий из NFT-трансфера.
@@ -155,6 +223,7 @@ async def poll_loop() -> None:
         try:
             if ton_client.is_configured():
                 await process_incoming_transfers()
+                await process_ton_deposits()
         except asyncio.CancelledError:
             logger.info("Поллер депозитов остановлен")
             raise

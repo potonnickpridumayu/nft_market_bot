@@ -185,7 +185,6 @@ async def update_balance(user_id: int, delta: float):
         delta, user_id,
     )
 
-
 # ── Gifts ─────────────────────────────────────────────────────────────────────
 
 async def add_gift(owner_id: int, collection_name: str, gift_name: str,

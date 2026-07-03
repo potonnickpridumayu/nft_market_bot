@@ -7,6 +7,7 @@ import re
 import asyncio
 import ton_client
 import deposits
+import logging
 import urllib.request
 from typing import Optional
 from urllib.parse import parse_qsl
@@ -38,6 +39,11 @@ try:
 except Exception:
     MARKET_FEE = float(os.getenv("MARKET_FEE", "0.03"))
     REFERRAL_BONUS_PERCENT = float(os.getenv("REFERRAL_BONUS_PERCENT", "0"))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

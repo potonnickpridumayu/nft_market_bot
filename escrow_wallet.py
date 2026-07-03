@@ -1,8 +1,9 @@
 import logging
 import os
 
-from tonutils.client import ToncenterV3Client
-from tonutils.wallet import WalletV5R1
+from tonutils.clients import ToncenterClient
+from tonutils.contracts import WalletV5R1
+from ton_core.contrib.types import NetworkGlobalID
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +27,9 @@ def get_escrow_wallet():
         )
 
     is_testnet = os.environ.get("TON_NETWORK", "testnet") == "testnet"
-    client = ToncenterV3Client(
-        is_testnet=is_testnet,
+    network = NetworkGlobalID.TESTNET if is_testnet else NetworkGlobalID.MAINNET
+    client = ToncenterClient(
+        network,
         api_key=os.environ.get("TON_API_KEY"),
     )
 

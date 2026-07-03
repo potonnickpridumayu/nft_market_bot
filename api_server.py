@@ -293,7 +293,13 @@ async def buy_listing(
 
     seller = await get_user(seller_id)
     ref_bonus = 0.0
-    if seller and seller.get("referred_by"):
+    # Гард от самореферала: покупатель-рефер продавца не получает бонус
+    # со своей же покупки (иначе это скрытая скидка на лоты своих рефералов).
+    if (
+            seller
+            and seller.get("referred_by")
+            and seller["referred_by"] != buyer_id
+    ):
         ref_bonus = price * REFERRAL_BONUS_PERCENT
 
     # Демо-режим: списываем с внутреннего баланса. В проде — реальный TON-платёж.

@@ -12,7 +12,7 @@ from typing import Optional
 from urllib.parse import parse_qsl
 
 from contextlib import asynccontextmanager
-from db.queries import init_db, close_pool
+from db.queries import init_db, close_pool, get_gift
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -38,7 +38,7 @@ try:
 except Exception:
     MARKET_FEE = float(os.getenv("MARKET_FEE", "0.03"))
     REFERRAL_BONUS_PERCENT = float(os.getenv("REFERRAL_BONUS_PERCENT", "0"))
-    
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -180,8 +180,8 @@ async def listing_detail(listing_id: int):
 
 
 class CreateListingBody(BaseModel):
-    # Теперь принимаем ссылку на подарок из Telegram, а не числовой gift_id.
-    gift_url: str
+    gift_id: Optional[int] = None   # задепозиченный NFT (новый путь)
+    gift_url: Optional[str] = None  # ссылка t.me/nft/... (старый путь)
     price: float
     description: str = ""
 
@@ -196,7 +196,25 @@ async def create_listing_endpoint(
         raise HTTPException(401, "Unauthorized")
 
     if body.price <= 0:
-        raise HTTPException(400, "Price must be greater than 0")
+        if body.gift_id:
+            gift = await get_gift(body.gift_id)
+            if not gift or gift["owner_id"] != user["id"]:
+                raise HTTPException(404, "Gift not found or not yours")
+            listing_id = await create_listing(
+                gift_id=body.gift_id,
+                seller_id=user["id"],
+                price_ton=body.price,
+                description=body.description,
+            )
+            return {
+                "ok": True,
+                "listing_id": listing_id,
+                "gift_id": body.gift_id,
+                "gift_name": gift["gift_name"],
+            }
+
+        if not body.gift_url:
+            raise HTTPException(400, "Either gift_id or gift_url is required")
 
     parsed = parse_gift_url(body.gift_url)
     if not parsed:

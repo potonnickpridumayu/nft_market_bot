@@ -12,7 +12,6 @@ from typing import Optional
 
 import asyncpg
 
-
 logger = logging.getLogger(__name__)
 
 # ── Пул соединений ─────────────────────────────────────────────────────────────

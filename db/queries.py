@@ -565,3 +565,29 @@ async def release_gift(gift_id: int):
     await pool.execute(
         "UPDATE gifts SET owner_id=NULL WHERE gift_id=$1", gift_id
     )
+
+async def set_gift_owner(gift_id: int, owner_id: Optional[int]):
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE gifts SET owner_id=$1 WHERE gift_id=$2", owner_id, gift_id
+    )
+
+
+async def gift_is_locked(gift_id: int) -> bool:
+    """Гифт занят активным лотом или аукционом — выводить нельзя."""
+    pool = await get_pool()
+    return await pool.fetchval(
+        """SELECT EXISTS(SELECT 1 FROM listings
+                         WHERE gift_id=$1 AND status='active')
+               OR EXISTS(SELECT 1 FROM auctions
+                         WHERE gift_id=$1 AND status='active')""",
+        gift_id,
+    )
+
+async def get_gift_by_nft_address(nft_address: str) -> Optional[dict]:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT * FROM gifts WHERE nft_address=$1 ORDER BY gift_id DESC LIMIT 1",
+        nft_address,
+    )
+    return dict(row) if row else None

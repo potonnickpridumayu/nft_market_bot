@@ -20,7 +20,9 @@ from db.queries import (
     get_pending_intent_by_code,
     is_event_processed,
     mark_event_processed,
-    touch_unmatched_event
+    touch_unmatched_event,
+    get_gift_by_nft_address,
+    transfer_gift,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,16 +103,23 @@ async def process_incoming_transfers() -> None:
         intent = await get_pending_intent_by_code(code) if code else None
 
         if intent:
-            meta = await fetch_nft_meta(nft_address)
-            gift_id = await add_gift(
-                owner_id=intent["user_id"],
-                collection_name=meta.get("collection_address", "") or "TON NFT",
-                gift_name=meta.get("name") or "NFT Gift",
-                gift_number="",
-                rarity="Common",
-                image_url=meta.get("image", ""),
-                nft_address=nft_address,
-            )
+            existing = await get_gift_by_nft_address(nft_address)
+            if existing:
+                # Повторный депозит известного NFT — возвращаем гифт
+                # владельцу вместо создания дубля.
+                gift_id = existing["gift_id"]
+                await transfer_gift(gift_id, intent["user_id"])
+            else:
+                meta = await fetch_nft_meta(nft_address)
+                gift_id = await add_gift(
+                    owner_id=intent["user_id"],
+                    collection_name=meta.get("collection_address", "") or "TON NFT",
+                    gift_name=meta.get("name") or "NFT Gift",
+                    gift_number="",
+                    rarity="Common",
+                    image_url=meta.get("image", ""),
+                    nft_address=nft_address,
+                )
             await complete_deposit_intent(
                 intent["intent_id"], nft_address, gift_id,
                 from_address=t.get("old_owner") or "",

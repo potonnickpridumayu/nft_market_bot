@@ -13,7 +13,7 @@ from typing import Optional
 from urllib.parse import parse_qsl
 
 from contextlib import asynccontextmanager
-from db.queries import init_db, close_pool, get_gift, get_deposit_source, set_listing_status, release_gift
+from db.queries import init_db, close_pool, get_gift, get_deposit_source, set_listing_status, release_gift, set_gift_owner, gift_is_locked
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -446,6 +446,52 @@ async def create_deposit_intent_endpoint(
         "network": ton_client.TON_NETWORK,
         "instructions": "Отправьте NFT на этот адрес, указав код в комментарии к переводу.",
     }
+
+ADDR_RE = re.compile(r"^(-?\d+:[0-9a-fA-F]{64}|[A-Za-z0-9_-]{48})$")
+
+class WithdrawBody(BaseModel):
+    to_address: str
+
+@app.post("/api/gifts/{gift_id}/withdraw")
+async def withdraw_gift(
+        gift_id: int,
+        body: WithdrawBody,
+        x_telegram_init_data: Optional[str] = Header(None),
+):
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Unauthorized")
+
+    gift = await get_gift(gift_id)
+    if not gift or gift.get("owner_id") != user["id"]:
+        raise HTTPException(404, "Gift not found")
+
+    nft_address = gift.get("nft_address") or ""
+    if not nft_address:
+        raise HTTPException(409, "No on-chain NFT behind this gift")
+
+    if await gift_is_locked(gift_id):
+        raise HTTPException(409, "Gift is on sale — cancel the listing first")
+
+    to_address = body.to_address.strip()
+    if not ADDR_RE.match(to_address):
+        raise HTTPException(400, "Invalid TON address")
+    if to_address == ton_client.TON_WALLET_ADDRESS:
+        raise HTTPException(400, "Cannot withdraw to the escrow wallet")
+
+    # Снимаем владение ДО отправки — чтобы гифт нельзя было выставить,
+    # пока транзакция в полёте. При фейле откатываем.
+    await set_gift_owner(gift_id, None)
+    try:
+        from escrow_wallet import send_nft
+        tx = await send_nft(nft_address, to_address,
+                            comment="GiftSafe: NFT delivery")
+    except Exception as e:
+        await set_gift_owner(gift_id, user["id"])
+        logger.warning("Gift withdraw failed for gift %s: %s", gift_id, e)
+        raise HTTPException(502, "NFT transfer failed, gift restored")
+
+    return {"ok": True, "tx": tx, "sent_to": to_address}
 
 @app.post("/api/escrow/withdraw/{listing_id}")
 async def withdraw_listing(

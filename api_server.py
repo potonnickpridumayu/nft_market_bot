@@ -13,7 +13,7 @@ from typing import Optional
 from urllib.parse import parse_qsl
 
 from contextlib import asynccontextmanager
-from db.queries import init_db, close_pool, get_gift, get_deposit_source, set_listing_status, release_gift, set_gift_owner, gift_is_locked, debug_all_gifts
+from db.queries import init_db, close_pool, get_gift, get_deposit_source, set_listing_status, release_gift, set_gift_owner, gift_is_locked
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -179,10 +179,6 @@ async def listings(
     items = await get_active_listings(limit=limit, offset=offset,
                                        collection=collection, max_price=max_price)
     return {"listings": items, "total": len(items)}
-
-@app.get("/api/debug/gifts")
-async def debug_gifts():
-    return await debug_all_gifts()
 
 @app.get("/api/listings/{listing_id}")
 async def listing_detail(listing_id: int):

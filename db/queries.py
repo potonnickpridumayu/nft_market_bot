@@ -20,18 +20,6 @@ logger = logging.getLogger(__name__)
 
 _pool: Optional[asyncpg.Pool] = None
 
-async def debug_all_gifts():
-    pool = await get_pool()
-    await pool.execute("DELETE FROM deposit_intents WHERE gift_id IN (1, 2, 3)")
-    await pool.execute("DELETE FROM listings WHERE gift_id IN (1, 2, 3)")
-    await pool.execute("DELETE FROM gifts WHERE gift_id IN (1, 2, 3)")
-    gifts = await pool.fetch("SELECT * FROM gifts")
-    listings = await pool.fetch("SELECT * FROM listings")
-    return {
-        "gifts": [{k: str(v) for k, v in dict(r).items()} for r in gifts],
-        "listings": [{k: str(v) for k, v in dict(r).items()} for r in listings],
-    }
-
 async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:

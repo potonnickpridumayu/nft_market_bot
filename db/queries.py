@@ -22,7 +22,8 @@ _pool: Optional[asyncpg.Pool] = None
 
 async def debug_all_gifts():
     pool = await get_pool()
-    await pool.execute("DELETE FROM listings WHERE listing_id IN (1, 2)")
+    await pool.execute("DELETE FROM deposit_intents WHERE gift_id IN (1, 2, 3)")
+    await pool.execute("DELETE FROM listings WHERE gift_id IN (1, 2, 3)")
     await pool.execute("DELETE FROM gifts WHERE gift_id IN (1, 2, 3)")
     gifts = await pool.fetch("SELECT * FROM gifts")
     listings = await pool.fetch("SELECT * FROM listings")

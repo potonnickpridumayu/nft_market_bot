@@ -47,6 +47,8 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from escrow_wallet import get_escrow_wallet
+    get_escrow_wallet()
     await init_db()
     poller = asyncio.create_task(deposits.poll_loop())
     yield

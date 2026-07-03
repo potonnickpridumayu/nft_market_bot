@@ -196,29 +196,29 @@ async def create_listing_endpoint(
         raise HTTPException(401, "Unauthorized")
 
     if body.price <= 0:
-        if body.gift_id:
-            gift = await get_gift(body.gift_id)
-            if not gift or gift["owner_id"] != user["id"]:
-                raise HTTPException(404, "Gift not found or not yours")
-            listing_id = await create_listing(
-                gift_id=body.gift_id,
-                seller_id=user["id"],
-                price_ton=body.price,
-                description=body.description,
-            )
-            return {
-                "ok": True,
-                "listing_id": listing_id,
-                "gift_id": body.gift_id,
-                "gift_name": gift["gift_name"],
-            }
+            raise HTTPException(400, "Price must be greater than 0")
+            # Новый путь: подарок уже задепозичен, создаём листинг по gift_id
+    if body.gift_id:
+        gift = await get_gift(body.gift_id)
+        if not gift or gift["owner_id"] != user["id"]:
+            raise HTTPException(404, "Gift not found or not yours")
+        listing_id = await create_listing(
+            gift_id=body.gift_id,
+            seller_id=user["id"],
+            price_ton=body.price,
+            description=body.description,
+        )
+        return {
+            "ok": True,
+            "listing_id": listing_id,
+            "gift_id": body.gift_id,
+            "gift_name": gift["gift_name"],
+        }
 
-        if not body.gift_url:
-            raise HTTPException(400, "Either gift_id or gift_url is required")
+    if not body.gift_url:
+        raise HTTPException(400, "Either gift_id or gift_url is required")
 
     parsed = parse_gift_url(body.gift_url)
-    if not parsed:
-        raise HTTPException(400, "Invalid gift link. Expected t.me/nft/...")
 
     # Продавец мог открыть Mini App, не нажимая /start в боте —
     # гарантируем, что он есть в users (иначе FK на owner_id упадёт).

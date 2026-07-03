@@ -12,6 +12,7 @@ import logging
 
 import ton_client
 from pytoniq_core import Cell
+from datetime import datetime, timezone
 
 from db.queries import (
     add_gift,
@@ -19,10 +20,12 @@ from db.queries import (
     get_pending_intent_by_code,
     is_event_processed,
     mark_event_processed,
+    touch_unmatched_event
 )
 
 logger = logging.getLogger(__name__)
 
+GRACE_PERIOD = 30 * 60  # сек: сколько ждём матча несматченного трансфера
 POLL_INTERVAL = 15   # секунд между проверками
 BATCH_LIMIT = 20     # сколько последних трансферов смотрим за раз
 
@@ -109,19 +112,28 @@ async def process_incoming_transfers() -> None:
                 nft_address=nft_address,
             )
             await complete_deposit_intent(intent["intent_id"], nft_address, gift_id)
+            await mark_event_processed(tx_hash, "completed")
             logger.info(
                 "✅ Депозит: NFT %s → user %s (gift_id=%s, code=%s)",
                 nft_address, intent["user_id"], gift_id, code,
             )
         else:
-            # NFT пришёл без кода или с неизвестным кодом — фиксируем в логах,
-            # транзакцию помечаем обработанной, чтобы не крутить её вечно.
-            logger.warning(
-                "⚠️ Входящий NFT без валидного кода: nft=%s, comment=%r, tx=%s",
-                nft_address, code, tx_hash,
-            )
-
-        await mark_event_processed(tx_hash)
+            # Матча нет: либо NFT реально без кода, либо toncenter ещё не
+            # проиндексировал forward_payload. Даём grace-период, потом финалим.
+            first_seen = await touch_unmatched_event(tx_hash)
+            age = (datetime.now(timezone.utc) - first_seen).total_seconds()
+            if age >= GRACE_PERIOD:
+                logger.warning(
+                    "⛔ Несматченный NFT финализирован (лежит на сейфе бесхозным): "
+                    "nft=%s, comment=%r, tx=%s",
+                    nft_address, code, tx_hash,
+                )
+                await mark_event_processed(tx_hash, "unmatched_final")
+            else:
+                logger.info(
+                    "⏳ Несматченный трансфер, ждём (%d/%d сек): tx=%s, comment=%r",
+                    age, GRACE_PERIOD, tx_hash, code,
+                )
 
 
 async def poll_loop() -> None:

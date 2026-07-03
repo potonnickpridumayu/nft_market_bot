@@ -135,6 +135,9 @@ CREATE TABLE IF NOT EXISTS referral_payouts (
     amount_ton   DOUBLE PRECISION NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'processed';
+ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 """
 
 
@@ -494,16 +497,33 @@ async def complete_deposit_intent(intent_id: int, nft_address: str, gift_id: int
 
 
 async def is_event_processed(tx_hash: str) -> bool:
+    """Обработано терминально. 'unmatched_pending' — НЕ терминально,
+    такой трансфер поллер будет пытаться сматчить снова."""
     pool = await get_pool()
-    return bool(await pool.fetchval(
-        "SELECT 1 FROM escrow_events WHERE tx_hash=$1", tx_hash
-    ))
+    status = await pool.fetchval(
+        "SELECT status FROM escrow_events WHERE tx_hash=$1", tx_hash
+    )
+    return status is not None and status != "unmatched_pending"
 
 
-async def mark_event_processed(tx_hash: str):
+async def mark_event_processed(tx_hash: str, status: str = "processed"):
     pool = await get_pool()
     await pool.execute(
-        "INSERT INTO escrow_events (tx_hash) VALUES ($1) ON CONFLICT DO NOTHING",
+        """INSERT INTO escrow_events (tx_hash, status) VALUES ($1, $2)
+           ON CONFLICT (tx_hash) DO UPDATE SET status = EXCLUDED.status""",
+        tx_hash, status,
+    )
+
+
+async def touch_unmatched_event(tx_hash: str):
+    """Фиксирует несматченный трансфер как 'unmatched_pending' (если ещё не записан)
+    и возвращает first_seen_at — от него считаем grace-период."""
+    pool = await get_pool()
+    return await pool.fetchval(
+        """INSERT INTO escrow_events (tx_hash, status)
+           VALUES ($1, 'unmatched_pending')
+           ON CONFLICT (tx_hash) DO UPDATE SET tx_hash = EXCLUDED.tx_hash
+           RETURNING first_seen_at""",
         tx_hash,
     )
 

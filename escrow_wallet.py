@@ -50,6 +50,8 @@ def get_escrow_wallet():
 async def send_nft(nft_address: str, to_address: str, comment: str | None = None) -> str:
     """Отправить NFT с сейфа. Возвращает хеш внешнего сообщения."""
     wallet = get_escrow_wallet()
+    if not wallet.client.connected:
+        await wallet.client.connect()
     builder = NFTTransferBuilder(
         destination=to_address,
         nft_address=nft_address,

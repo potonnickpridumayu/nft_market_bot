@@ -13,7 +13,7 @@ from typing import Optional
 from urllib.parse import parse_qsl
 
 from contextlib import asynccontextmanager
-from db.queries import init_db, close_pool, get_gift
+from db.queries import init_db, close_pool, get_gift, get_deposit_source, set_listing_status, release_gift
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -445,6 +445,45 @@ async def create_deposit_intent_endpoint(
         "instructions": "Отправьте NFT на этот адрес, указав код в комментарии к переводу.",
     }
 
+@app.post("/api/escrow/withdraw/{listing_id}")
+async def withdraw_listing(
+        listing_id: int,
+        x_telegram_init_data: Optional[str] = Header(None),
+):
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Unauthorized")
+
+    listing = await get_listing(listing_id)
+    if not listing:
+        raise HTTPException(404, "Listing not found")
+    if listing["seller_id"] != user["id"]:
+        raise HTTPException(403, "Not your listing")
+    if listing["status"] != "active":
+        raise HTTPException(409, "Listing is not active")
+
+    gift = await get_gift(listing["gift_id"])
+    nft_address = (gift or {}).get("nft_address") or ""
+    if not nft_address:
+        raise HTTPException(409, "No on-chain NFT behind this listing")
+
+    to_address = await get_deposit_source(user["id"], nft_address)
+    if not to_address:
+        raise HTTPException(409, "Deposit source address unknown")
+
+    # Сначала гасим лот (чтобы его нельзя было купить), потом шлём NFT.
+    # Если отправка упала — возвращаем лот в active и отдаём ошибку.
+    await set_listing_status(listing_id, "cancelled")
+    try:
+        from escrow_wallet import send_nft
+        tx = await send_nft(nft_address, to_address, comment="GiftSafe: NFT return")
+    except Exception as e:
+        await set_listing_status(listing_id, "active")
+        logger.warning("Withdraw failed for listing %s: %s", listing_id, e)
+        raise HTTPException(502, "NFT transfer failed, listing restored")
+
+    await release_gift(listing["gift_id"])
+    return {"ok": True, "tx": tx, "returned_to": to_address}
 
 @app.get("/api/escrow/deposit-intent")
 async def deposit_intent_status(

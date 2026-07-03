@@ -539,3 +539,29 @@ async def get_latest_intent_for_user(user_id: int) -> Optional[dict]:
         user_id,
     )
     return dict(row) if row else None
+
+async def get_deposit_source(user_id: int, nft_address: str) -> Optional[str]:
+    """Адрес, с которого юзер депонировал этот NFT."""
+    pool = await get_pool()
+    return await pool.fetchval(
+        """SELECT from_address FROM deposit_intents
+           WHERE user_id=$1 AND nft_address=$2 AND status='completed'
+                 AND from_address <> ''
+           ORDER BY completed_at DESC LIMIT 1""",
+        user_id, nft_address,
+    )
+
+
+async def set_listing_status(listing_id: int, status: str):
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE listings SET status=$2 WHERE listing_id=$1", listing_id, status
+    )
+
+
+async def release_gift(gift_id: int):
+    """NFT ушёл с платформы — убираем подарок из инвентаря (owner→NULL)."""
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE gifts SET owner_id=NULL WHERE gift_id=$1", gift_id
+    )

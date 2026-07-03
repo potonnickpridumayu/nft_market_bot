@@ -13,7 +13,7 @@ from typing import Optional
 from urllib.parse import parse_qsl
 
 from contextlib import asynccontextmanager
-from db.queries import init_db, close_pool, get_gift, get_deposit_source, set_listing_status, release_gift, set_gift_owner, gift_is_locked
+from db.queries import init_db, close_pool, get_gift, get_deposit_source, set_listing_status, release_gift, set_gift_owner, gift_is_locked, debug_all_gifts
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -182,10 +182,7 @@ async def listings(
 
 @app.get("/api/debug/gifts")
 async def debug_gifts():
-    rows = await pool.fetch(
-        "SELECT id, owner_id, name, status, nft_address FROM gifts ORDER BY id"
-    )
-    return [dict(r) for r in rows]
+    return await debug_all_gifts()
 
 @app.get("/api/listings/{listing_id}")
 async def listing_detail(listing_id: int):

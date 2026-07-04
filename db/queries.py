@@ -232,6 +232,13 @@ async def transfer_gift(gift_id: int, new_owner_id: int):
         new_owner_id, gift_id,
     )
 
+async def update_gift_meta(gift_id: int, gift_name: str, image_url: str):
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE gifts SET gift_name=$1, image_url=$2 WHERE gift_id=$3",
+        gift_name, image_url, gift_id,
+    )
+
 
 # ── Listings ──────────────────────────────────────────────────────────────────
 

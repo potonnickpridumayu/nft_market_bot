@@ -27,6 +27,7 @@ from db.queries import (
     get_gift_by_nft_address,
     transfer_gift,
     update_balance,
+    update_gift_meta,
 )
 
 logger = logging.getLogger(__name__)
@@ -238,6 +239,22 @@ async def process_incoming_transfers() -> None:
                 # владельцу вместо создания дубля.
                 gift_id = existing["gift_id"]
                 await transfer_gift(gift_id, intent["user_id"])
+                # Если метаданные с прошлого раза пустые/заглушка —
+                # пробуем дообогатить (best-effort, как и первый fetch).
+                needs_meta = (
+                    not existing.get("image_url")
+                    or existing.get("gift_name") in ("", "NFT Gift", None)
+                )
+                if needs_meta:
+                    meta = await fetch_nft_meta(nft_address)
+                    new_name = meta.get("name") or existing.get("gift_name") or "NFT Gift"
+                    new_image = meta.get("image") or existing.get("image_url") or ""
+                    if meta.get("name") or meta.get("image"):
+                        await update_gift_meta(gift_id, new_name, new_image)
+                        logger.info(
+                            "🖼 Метаданные гифта %s дообогащены: name=%r",
+                            gift_id, new_name,
+                        )
             else:
                 meta = await fetch_nft_meta(nft_address)
                 gift_id = await add_gift(

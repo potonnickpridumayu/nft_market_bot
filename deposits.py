@@ -280,16 +280,29 @@ async def process_incoming_transfers() -> None:
 async def poll_loop() -> None:
     """Бесконечный цикл поллера. Запускается из lifespan FastAPI."""
     logger.info("🔄 Поллер депозитов запущен (интервал %s сек)", POLL_INTERVAL)
+    steps = (
+        ("nft_transfers", process_incoming_transfers),
+        ("ton_deposits", process_ton_deposits),
+        ("withdrawal_refunds", process_withdrawal_refunds),
+    )
     while True:
         try:
             if ton_client.is_configured():
-                await process_incoming_transfers()
-                await process_ton_deposits()
-                await process_withdrawal_refunds()
+                # каждый шаг изолирован: сбой одного (например, 401 от
+                # /nft/transfers) не блокирует депозиты TON и рефанды
+                for step_name, step in steps:
+                    try:
+                        await step()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.warning(
+                            "Поллер [%s]: %s: %s", step_name, e.__class__.__name__, e
+                        )
         except asyncio.CancelledError:
             logger.info("Поллер депозитов остановлен")
             raise
         except Exception as e:
-            # сеть/рейт-лимит toncenter — не роняем цикл
+            # на всякий случай — не роняем цикл
             logger.warning("Поллер: %s: %s", e.__class__.__name__, e)
         await asyncio.sleep(POLL_INTERVAL)

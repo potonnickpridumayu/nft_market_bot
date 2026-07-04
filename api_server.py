@@ -566,6 +566,10 @@ async def withdraw_listing(
         listing_id: int,
         x_telegram_init_data: Optional[str] = Header(None),
 ):
+    """Снятие лота с продажи (MRKT-модель).
+
+    Только гасим лот: NFT остаётся в сейфе, подарок — в портфеле продавца.
+    Ончейн-возврат на кошелёк — отдельная ручка /api/gifts/{id}/withdraw."""
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
         raise HTTPException(401, "Unauthorized")
@@ -578,28 +582,8 @@ async def withdraw_listing(
     if listing["status"] != "active":
         raise HTTPException(409, "Listing is not active")
 
-    gift = await get_gift(listing["gift_id"])
-    nft_address = (gift or {}).get("nft_address") or ""
-    if not nft_address:
-        raise HTTPException(409, "No on-chain NFT behind this listing")
-
-    to_address = await get_deposit_source(user["id"], nft_address)
-    if not to_address:
-        raise HTTPException(409, "Deposit source address unknown")
-
-    # Сначала гасим лот (чтобы его нельзя было купить), потом шлём NFT.
-    # Если отправка упала — возвращаем лот в active и отдаём ошибку.
     await set_listing_status(listing_id, "cancelled")
-    try:
-        from escrow_wallet import send_nft
-        tx = await send_nft(nft_address, to_address, comment="GiftSafe: NFT return")
-    except Exception as e:
-        await set_listing_status(listing_id, "active")
-        logger.warning("Withdraw failed for listing %s: %s", listing_id, e)
-        raise HTTPException(502, "NFT transfer failed, listing restored")
-
-    await release_gift(listing["gift_id"])
-    return {"ok": True, "tx": tx, "returned_to": to_address}
+    return {"ok": True, "delisted": True, "gift_id": listing["gift_id"]}
 
 @app.get("/api/escrow/deposit-intent")
 async def deposit_intent_status(

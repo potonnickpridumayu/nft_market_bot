@@ -232,6 +232,13 @@ async def transfer_gift(gift_id: int, new_owner_id: int):
         new_owner_id, gift_id,
     )
 
+async def get_active_listing_for_gift(gift_id: int):
+    pool = await get_pool()
+    return await pool.fetchrow(
+        "SELECT listing_id FROM listings WHERE gift_id=$1 AND status='active'",
+        gift_id,
+    )
+
 async def update_gift_meta(gift_id: int, gift_name: str, image_url: str):
     pool = await get_pool()
     await pool.execute(

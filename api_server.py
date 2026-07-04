@@ -29,6 +29,8 @@ from db.queries import (
     record_referral_payout, mark_listing_sold,get_or_create_deposit_intent, get_latest_intent_for_user,
     # C-4: надёжные выводы TON:
     create_withdrawal, mark_withdrawal_sent,
+    # гард от дублей лотов:
+    get_active_listing_for_gift,
 )
 
 load_dotenv()
@@ -207,18 +209,27 @@ async def create_listing_endpoint(
         raise HTTPException(401, "Unauthorized")
 
     if body.price <= 0:
-            raise HTTPException(400, "Price must be greater than 0")
-            # Новый путь: подарок уже задепозичен, создаём листинг по gift_id
+        raise HTTPException(400, "Price must be greater than 0")
+
+    # Новый путь: подарок уже задепозичен, создаём листинг по gift_id
     if body.gift_id:
         gift = await get_gift(body.gift_id)
         if not gift or gift["owner_id"] != user["id"]:
             raise HTTPException(404, "Gift not found or not yours")
-        listing_id = await create_listing(
-            gift_id=body.gift_id,
-            seller_id=user["id"],
-            price_ton=body.price,
-            description=body.description,
-        )
+        if await get_active_listing_for_gift(body.gift_id):
+            raise HTTPException(409, "Этот подарок уже выставлен на продажу")
+        try:
+            listing_id = await create_listing(
+                gift_id=body.gift_id,
+                seller_id=user["id"],
+                price_ton=body.price,
+                description=body.description,
+            )
+        except Exception as e:
+            # гонка двух параллельных запросов упрётся в уникальный индекс
+            if "uq_listings_active_gift" in str(e):
+                raise HTTPException(409, "Этот подарок уже выставлен на продажу")
+            raise
         return {
             "ok": True,
             "listing_id": listing_id,
@@ -398,7 +409,12 @@ async def portfolio(x_telegram_init_data: Optional[str] = Header(None)):
     if not user:
         raise HTTPException(401, "Unauthorized")
     gifts = await get_user_gifts(user["id"])
-    return {"gifts": gifts}
+    result = []
+    for g in gifts:
+        g = dict(g)
+        g["on_sale"] = bool(await get_active_listing_for_gift(g["gift_id"]))
+        result.append(g)
+    return {"gifts": result}
 
 
 # ===== PROFILE =====

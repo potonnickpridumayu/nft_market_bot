@@ -27,6 +27,8 @@ from db.queries import (
     # для покупки:
     update_balance, transfer_gift, record_transaction,
     record_referral_payout, mark_listing_sold,get_or_create_deposit_intent, get_latest_intent_for_user,
+    # C-4: надёжные выводы TON:
+    create_withdrawal, mark_withdrawal_sent,
 )
 
 load_dotenv()
@@ -517,22 +519,31 @@ async def withdraw_balance(
     if to_address == ton_client.TON_WALLET_ADDRESS:
         raise HTTPException(400, "Cannot withdraw to the escrow wallet")
 
-    db_user = await get_user(user["id"])
-    balance = float((db_user or {}).get("balance_ton") or 0)
-    if amount > balance:
+    # C-4: списание баланса и создание записи вывода — атомарно, под локом
+    # строки users (закрывает и гонку двух одновременных выводов).
+    wd_id = await create_withdrawal(user["id"], to_address, amount)
+    if not wd_id:
         raise HTTPException(409, "Недостаточно средств")
 
-    # Списываем ДО отправки, при фейле откатываем — как в NFT-выводах
-    await update_balance(user["id"], -amount)
     try:
         from escrow_wallet import send_ton
-        tx = await send_ton(to_address, amount, comment="GiftSafe: withdrawal")
+        # Уникальный комментарий — по нему поллер подтвердит вывод в блокчейне.
+        tx = await send_ton(to_address, amount,
+                            comment=f"GiftSafe: withdrawal #{wd_id}")
+        await mark_withdrawal_sent(wd_id, tx)
     except Exception as e:
-        await update_balance(user["id"], amount)
-        logger.warning("TON withdraw failed for user %s: %s", user["id"], e)
-        raise HTTPException(502, "Не удалось отправить, баланс восстановлен")
+        # НЕ возвращаем баланс сразу: исключение не гарантирует, что TON не ушли
+        # (нода могла принять сообщение, а ответ — потеряться). Решает поллер:
+        # найдёт транзакцию → confirmed; не найдёт за грейс-период → refunded.
+        logger.warning("TON withdraw #%s send error for user %s: %s",
+                       wd_id, user["id"], e)
+        raise HTTPException(
+            502,
+            "Отправка не подтверждена. Если TON не придут в течение ~15 минут, "
+            "баланс вернётся автоматически",
+        )
 
-    return {"ok": True, "tx": tx, "amount": amount, "sent_to": to_address}
+    return {"ok": True, "tx": tx, "amount": amount, "sent_to": to_address, "wd_id": wd_id}
 
 @app.post("/api/escrow/withdraw/{listing_id}")
 async def withdraw_listing(

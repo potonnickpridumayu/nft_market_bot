@@ -135,6 +135,18 @@ CREATE TABLE IF NOT EXISTS referral_payouts (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS withdrawals (
+    wd_id        BIGSERIAL PRIMARY KEY,
+    user_id      BIGINT REFERENCES users(user_id),
+    to_address   TEXT NOT NULL,
+    amount_ton   DOUBLE PRECISION NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    tx_hash      TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    sent_at      TIMESTAMPTZ,
+    confirmed_at TIMESTAMPTZ
+);
+
 ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'processed';
 ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE deposit_intents ADD COLUMN IF NOT EXISTS from_address TEXT;
@@ -589,3 +601,63 @@ async def get_gift_by_nft_address(nft_address: str) -> Optional[dict]:
         nft_address,
     )
     return dict(row) if row else None
+
+# ── Withdrawals (C-4) ─────────────────────────────────────────────────────────
+
+async def create_withdrawal(user_id: int, to_address: str, amount_ton: float) -> int:
+    """Атомарно: списать баланс + создать запись pending. 0 — если не хватило средств."""
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        async with con.transaction():
+            bal = await con.fetchval(
+                "SELECT balance_ton FROM users WHERE user_id=$1 FOR UPDATE", user_id)
+            if bal is None or float(bal) < amount_ton:
+                return 0
+            await con.execute(
+                "UPDATE users SET balance_ton = balance_ton - $1 WHERE user_id=$2",
+                amount_ton, user_id)
+            return await con.fetchval(
+                """INSERT INTO withdrawals (user_id, to_address, amount_ton)
+                   VALUES ($1,$2,$3) RETURNING wd_id""",
+                user_id, to_address, amount_ton)
+
+
+async def mark_withdrawal_sent(wd_id: int, tx_hash: str):
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE withdrawals SET status='sent', tx_hash=$1, sent_at=NOW() WHERE wd_id=$2 AND status='pending'",
+        tx_hash, wd_id)
+
+
+async def confirm_withdrawal(wd_id: int) -> bool:
+    """Поллер нашёл исходящую транзакцию в блокчейне. True — если реально перевели в confirmed."""
+    pool = await get_pool()
+    res = await pool.execute(
+        """UPDATE withdrawals SET status='confirmed', confirmed_at=NOW()
+           WHERE wd_id=$1 AND status IN ('pending','sent')""", wd_id)
+    return res.endswith("1")
+
+
+async def refund_stale_withdrawals(grace_minutes: int = 15) -> list:
+    """Вернуть баланс по выводам без ончейн-подтверждения дольше грейс-периода.
+
+    Статус-гард в UPDATE защищает от двойного возврата даже при гонке."""
+    pool = await get_pool()
+    refunded = []
+    async with pool.acquire() as con:
+        rows = await con.fetch(
+            """SELECT wd_id, user_id, amount_ton FROM withdrawals
+               WHERE status IN ('pending','sent')
+                 AND created_at < NOW() - ($1 || ' minutes')::interval""",
+            str(int(grace_minutes)))
+        for r in rows:
+            async with con.transaction():
+                res = await con.execute(
+                    "UPDATE withdrawals SET status='refunded' WHERE wd_id=$1 AND status IN ('pending','sent')",
+                    r["wd_id"])
+                if res.endswith("1"):
+                    await con.execute(
+                        "UPDATE users SET balance_ton = balance_ton + $1 WHERE user_id=$2",
+                        r["amount_ton"], r["user_id"])
+                    refunded.append(dict(r))
+    return refunded

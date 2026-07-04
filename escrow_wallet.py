@@ -63,3 +63,17 @@ async def send_nft(nft_address: str, to_address: str, comment: str | None = None
     ext = await wallet.transfer_message(builder)
     logger.info("📤 NFT %s отправлен на %s", nft_address, to_address)
     return ext.hash.hex() if hasattr(ext, "hash") else str(ext)
+
+async def send_ton(to_address: str, amount_ton: float, comment: str | None = None) -> str:
+    """Отправить обычные TON с сейфа. Возвращает хеш внешнего сообщения."""
+    wallet = get_escrow_wallet()
+    if not wallet.client.connected:
+        await wallet.client.connect()
+    ext = await wallet.transfer(
+        destination=to_address,
+        amount=int(amount_ton * 1_000_000_000),  # нанотоны
+        body=comment,
+        bounce=False,  # чтобы дошло даже на неинициализированный кошелёк
+    )
+    logger.info("📤 %s TON отправлено на %s", amount_ton, to_address)
+    return ext.hash.hex() if hasattr(ext, "hash") else str(ext)

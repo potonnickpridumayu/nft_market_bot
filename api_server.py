@@ -492,6 +492,48 @@ async def withdraw_gift(
 
     return {"ok": True, "tx": tx, "sent_to": to_address}
 
+MIN_WITHDRAW_TON = 0.1
+
+class BalanceWithdrawBody(BaseModel):
+    to_address: str
+    amount: float
+
+@app.post("/api/balance/withdraw")
+async def withdraw_balance(
+        body: BalanceWithdrawBody,
+        x_telegram_init_data: Optional[str] = Header(None),
+):
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Unauthorized")
+
+    amount = round(body.amount, 2)
+    if amount < MIN_WITHDRAW_TON:
+        raise HTTPException(400, f"Минимум для вывода — {MIN_WITHDRAW_TON} TON")
+
+    to_address = body.to_address.strip()
+    if not ADDR_RE.match(to_address):
+        raise HTTPException(400, "Invalid TON address")
+    if to_address == ton_client.TON_WALLET_ADDRESS:
+        raise HTTPException(400, "Cannot withdraw to the escrow wallet")
+
+    db_user = await get_user(user["id"])
+    balance = float((db_user or {}).get("balance_ton") or 0)
+    if amount > balance:
+        raise HTTPException(409, "Недостаточно средств")
+
+    # Списываем ДО отправки, при фейле откатываем — как в NFT-выводах
+    await update_balance(user["id"], -amount)
+    try:
+        from escrow_wallet import send_ton
+        tx = await send_ton(to_address, amount, comment="GiftSafe: withdrawal")
+    except Exception as e:
+        await update_balance(user["id"], amount)
+        logger.warning("TON withdraw failed for user %s: %s", user["id"], e)
+        raise HTTPException(502, "Не удалось отправить, баланс восстановлен")
+
+    return {"ok": True, "tx": tx, "amount": amount, "sent_to": to_address}
+
 @app.post("/api/escrow/withdraw/{listing_id}")
 async def withdraw_listing(
         listing_id: int,

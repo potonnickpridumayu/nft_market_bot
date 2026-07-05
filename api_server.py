@@ -719,7 +719,9 @@ async def admin_overview(x_admin_token: Optional[str] = Header(None)):
     users = [dict(r) for r in await pool.fetch(
         "SELECT user_id, username, full_name, balance_ton, referred_by FROM users ORDER BY user_id")]
     gifts = [dict(r) for r in await pool.fetch(
-        "SELECT gift_id, owner_id, gift_name, gift_number, rarity, nft_address, tg_owned_gift_id FROM gifts ORDER BY gift_id")]
+        """SELECT gift_id, owner_id, gift_name, gift_number, rarity, nft_address,
+                  tg_owned_gift_id, tg_sticker, tg_thumb
+           FROM gifts ORDER BY gift_id""")]
     conns = [dict(r) for r in await pool.fetch(
         "SELECT * FROM business_connections ORDER BY updated_at DESC")]
     return {"users": users, "gifts": gifts, "business_connections": conns}

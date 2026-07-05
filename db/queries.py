@@ -524,19 +524,15 @@ async def record_referral_payout(referrer_id: int, from_user_id: int,
     )
 
 async def get_referral_stats(user_id: int):
-    async with pool.acquire() as conn:
-        invited = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE referred_by = $1", user_id
-        ) or 0
-        earned = 0
-        try:
-            earned = await conn.fetchval(
-                "SELECT COALESCE(SUM(amount_ton), 0) FROM referral_payouts WHERE referrer_id = $1",
-                user_id,
-            ) or 0
-        except Exception:
-            pass  # если таблица/колонки выплат называются иначе — вернём 0
-        return {"invited": int(invited), "earned_ton": float(earned)}
+    pool = await get_pool()
+    invited = await pool.fetchval(
+        "SELECT COUNT(*) FROM users WHERE referred_by = $1", user_id
+    ) or 0
+    earned = await pool.fetchval(
+        "SELECT COALESCE(SUM(amount_ton), 0) FROM referral_payouts WHERE referrer_id = $1",
+        user_id,
+    ) or 0
+    return {"invited": int(invited), "earned_ton": float(earned)}
 
 
 # ── Admin stats ───────────────────────────────────────────────────────────────

@@ -602,6 +602,24 @@ async def deposit_intent_status(
         "nft_address": intent["nft_address"],
     }
 
+@app.get("/api/referral/stats")
+async def referral_stats(user=Depends(get_current_user)):
+    if not user:
+        raise HTTPException(401, "Unauthorized")
+    invited, earned = 0, 0
+    try:
+        async with pool.acquire() as conn:
+            invited = await conn.fetchval(
+                "SELECT COUNT(*) FROM users WHERE referrer_id = $1", user["id"]
+            ) or 0
+            earned = await conn.fetchval(
+                "SELECT COALESCE(referral_earned_ton, 0) FROM users WHERE user_id = $1", user["id"]
+            ) or 0
+    except Exception:
+        # колонок рефералки ещё нет в схеме — отдаём нули, фронт покажет пустую статистику
+        pass
+    return {"invited": int(invited), "earned_ton": float(earned)}
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))

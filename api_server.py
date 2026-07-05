@@ -30,7 +30,7 @@ from db.queries import (
     # C-4: надёжные выводы TON:
     create_withdrawal, mark_withdrawal_sent,
     # гард от дублей лотов:
-    get_active_listing_for_gift,
+    get_active_listing_for_gift, get_referral_stats,
 )
 
 load_dotenv()
@@ -603,22 +603,13 @@ async def deposit_intent_status(
     }
 
 @app.get("/api/referral/stats")
-async def referral_stats(user=Depends(get_current_user)):
+async def referral_stats(
+        x_telegram_init_data: Optional[str] = Header(None),
+):
+    user = get_user_from_header(x_telegram_init_data or "")
     if not user:
         raise HTTPException(401, "Unauthorized")
-    invited, earned = 0, 0
-    try:
-        async with pool.acquire() as conn:
-            invited = await conn.fetchval(
-                "SELECT COUNT(*) FROM users WHERE referrer_id = $1", user["id"]
-            ) or 0
-            earned = await conn.fetchval(
-                "SELECT COALESCE(referral_earned_ton, 0) FROM users WHERE user_id = $1", user["id"]
-            ) or 0
-    except Exception:
-        # колонок рефералки ещё нет в схеме — отдаём нули, фронт покажет пустую статистику
-        pass
-    return {"invited": int(invited), "earned_ton": float(earned)}
+    return await get_referral_stats(user["id"])
 
 if __name__ == "__main__":
     import uvicorn

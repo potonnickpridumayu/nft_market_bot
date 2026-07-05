@@ -31,6 +31,8 @@ from db.queries import (
     create_withdrawal, mark_withdrawal_sent,
     # гард от дублей лотов:
     get_active_listing_for_gift, get_referral_stats,
+    # админ-ручки:
+    get_pool,
 )
 
 load_dotenv()
@@ -631,6 +633,55 @@ async def referral_stats(
     if not user:
         raise HTTPException(401, "Unauthorized")
     return await get_referral_stats(user["id"])
+
+
+# ===== ADMIN =====
+# Прямой доступ к Railway-постгресу с локальной машины порезан провайдером,
+# поэтому ручные операции (привязка unclaimed-подарков и т.п.) — через API.
+# Авторизация: X-Admin-Token == BOT_TOKEN (владелец токена и так управляет ботом).
+
+def _check_admin(token: Optional[str]) -> None:
+    if not BOT_TOKEN or token != BOT_TOKEN:
+        raise HTTPException(401, "Unauthorized")
+
+
+@app.get("/api/admin/overview")
+async def admin_overview(x_admin_token: Optional[str] = Header(None)):
+    """Юзеры и подарки одним экраном — замена ручных SELECT в дашборде."""
+    _check_admin(x_admin_token)
+    pool = await get_pool()
+    users = [dict(r) for r in await pool.fetch(
+        "SELECT user_id, username, full_name, balance_ton, referred_by FROM users ORDER BY user_id")]
+    gifts = [dict(r) for r in await pool.fetch(
+        "SELECT gift_id, owner_id, gift_name, gift_number, rarity, nft_address, tg_owned_gift_id FROM gifts ORDER BY gift_id")]
+    conns = [dict(r) for r in await pool.fetch(
+        "SELECT * FROM business_connections ORDER BY updated_at DESC")]
+    return {"users": users, "gifts": gifts, "business_connections": conns}
+
+
+class ReassignBody(BaseModel):
+    user_id: int
+
+
+@app.post("/api/admin/gifts/{gift_id}/reassign")
+async def admin_reassign_gift(
+        gift_id: int,
+        body: ReassignBody,
+        x_admin_token: Optional[str] = Header(None),
+):
+    """Ручная привязка подарка (unclaimed / ошибочная атрибуция) к юзеру."""
+    _check_admin(x_admin_token)
+    gift = await get_gift(gift_id)
+    if not gift:
+        raise HTTPException(404, "Gift not found")
+    if await gift_is_locked(gift_id):
+        raise HTTPException(409, "Gift is on sale — cancel the listing first")
+    await get_or_create_user(body.user_id, "", "")
+    await set_gift_owner(gift_id, body.user_id)
+    logger.info("👮 Admin: gift %s переприсвоен user %s (был %s)",
+                gift_id, body.user_id, gift.get("owner_id"))
+    return {"ok": True, "gift_id": gift_id,
+            "old_owner": gift.get("owner_id"), "new_owner": body.user_id}
 
 if __name__ == "__main__":
     import uvicorn

@@ -120,7 +120,11 @@ async def process_ton_deposits() -> None:
 # ── C-4: подтверждение исходящих выводов TON ──────────────────────────────────
 
 WITHDRAWAL_RE = re.compile(r"GiftSafe: withdrawal #(\d+)")
-REFUND_GRACE_MINUTES = 15  # сколько ждём ончейн-подтверждения до возврата баланса
+# Сколько ждём ончейн-подтверждения до возврата баланса. Защита от двойной
+# выплаты при лаге индексатора toncenter: если вернуть слишком рано, а
+# транзакция потом "проявится" — юзер получит и TON, и рефанд. Для тестов
+# можно ужать через env (5 мин), для продакшена с реальными деньгами — 15.
+REFUND_GRACE_MINUTES = int(os.getenv("REFUND_GRACE_MINUTES", "15"))
 
 
 def decode_out_msg_comment(msg: dict) -> str | None:

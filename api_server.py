@@ -558,6 +558,21 @@ async def withdraw_balance(
     if to_address == ton_client.TON_WALLET_ADDRESS:
         raise HTTPException(400, "Cannot withdraw to the escrow wallet")
 
+    # Гард: на сейфе должно хватать TON (+ запас на сетевую комиссию), иначе
+    # ончейн-отправка провалится и юзер зря прождёт 15-минутный рефанд C-4.
+    try:
+        escrow_balance = await ton_client.get_wallet_balance()
+    except Exception:
+        escrow_balance = None  # TON API моргнул — не блокируем, C-4 подстрахует
+    if escrow_balance is not None and escrow_balance < amount + 0.05:
+        logger.warning("Вывод отклонён: на сейфе %.2f TON, запрошено %.2f (user %s)",
+                       escrow_balance, amount, user["id"])
+        raise HTTPException(
+            503,
+            "Вывод временно недоступен — недостаточно средств на кошельке сервиса. "
+            "Попробуйте меньшую сумму или зайдите позже",
+        )
+
     # C-4: списание баланса и создание записи вывода — атомарно, под локом
     # строки users (закрывает и гонку двух одновременных выводов).
     wd_id = await create_withdrawal(user["id"], to_address, amount)

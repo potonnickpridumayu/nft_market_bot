@@ -650,6 +650,57 @@ async def referral_stats(
     return await get_referral_stats(user["id"])
 
 
+# ===== TELEGRAM FILE PROXY =====
+# Стикеры подарков нельзя отдавать фронту прямой ссылкой — в ней токен бота.
+# Прокси: file_id → getFile → стрим содержимого. file_path у Telegram живёт
+# ~час, поэтому резолвим на каждый запрос, а браузеру разрешаем кешировать.
+
+FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{20,200}$")
+
+@app.get("/api/tg-file/{file_id}")
+async def tg_file_proxy(file_id: str):
+    if not BOT_TOKEN or not FILE_ID_RE.match(file_id):
+        raise HTTPException(404, "Not found")
+
+    def _fetch() -> tuple[bytes, str]:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+            data=json.dumps({"file_id": file_id}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        info = json.loads(urllib.request.urlopen(req, timeout=10).read())
+        if not info.get("ok"):
+            raise ValueError(info.get("description", "getFile failed"))
+        file_path = info["result"]["file_path"]
+        blob = urllib.request.urlopen(
+            f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}", timeout=15
+        ).read()
+        return blob, file_path
+
+    try:
+        blob, file_path = await asyncio.to_thread(_fetch)
+    except Exception as e:
+        logger.warning("tg-file proxy %s: %s", file_id[:16], e)
+        raise HTTPException(404, "File unavailable")
+
+    ext = file_path.rsplit(".", 1)[-1].lower()
+    media_type = {
+        "tgs": "application/gzip",   # gzip-нутый Lottie JSON
+        "webp": "image/webp",
+        "webm": "video/webm",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "png": "image/png",
+    }.get(ext, "application/octet-stream")
+
+    from fastapi import Response
+    return Response(
+        content=blob,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
+
+
 # ===== ADMIN =====
 # Прямой доступ к Railway-постгресу с локальной машины порезан провайдером,
 # поэтому ручные операции (привязка unclaimed-подарков и т.п.) — через API.

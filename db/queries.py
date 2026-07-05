@@ -151,6 +151,8 @@ ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 
 ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE deposit_intents ADD COLUMN IF NOT EXISTS from_address TEXT;
 ALTER TABLE gifts ADD COLUMN IF NOT EXISTS tg_owned_gift_id TEXT;
+ALTER TABLE gifts ADD COLUMN IF NOT EXISTS tg_sticker TEXT;   -- file_id анимации (tgs/webm)
+ALTER TABLE gifts ADD COLUMN IF NOT EXISTS tg_thumb TEXT;     -- file_id статичной превьюшки
 CREATE UNIQUE INDEX IF NOT EXISTS uq_gifts_tg_owned_gift_id
     ON gifts (tg_owned_gift_id) WHERE tg_owned_gift_id IS NOT NULL;
 
@@ -306,6 +308,17 @@ async def update_gift_meta(gift_id: int, gift_name: str, image_url: str):
     )
 
 
+async def update_gift_tg_media(gift_id: int, gift_name: str, gift_number: str,
+                               tg_sticker: str, tg_thumb: str):
+    """Дообогащение TG-гифта: чистое имя (без дубля номера) и file_id стикеров."""
+    pool = await get_pool()
+    await pool.execute(
+        """UPDATE gifts SET gift_name=$1, gift_number=$2, tg_sticker=$3, tg_thumb=$4
+           WHERE gift_id=$5""",
+        gift_name, gift_number, tg_sticker, tg_thumb, gift_id,
+    )
+
+
 # ── Listings ──────────────────────────────────────────────────────────────────
 
 async def create_listing(gift_id: int, seller_id: int, price_ton: float,
@@ -323,7 +336,8 @@ async def get_active_listings(limit: int = 20, offset: int = 0,
     pool = await get_pool()
     query = """
         SELECT l.*, g.gift_name, g.collection_name, g.gift_number,
-               g.rarity, g.image_url, u.username as seller_username
+               g.rarity, g.image_url, g.tg_sticker, g.tg_thumb,
+               u.username as seller_username
         FROM listings l
         JOIN gifts g ON l.gift_id = g.gift_id
         JOIN users u ON l.seller_id = u.user_id
@@ -348,7 +362,7 @@ async def get_listing(listing_id: int) -> Optional[dict]:
     pool = await get_pool()
     row = await pool.fetchrow(
         """SELECT l.*, g.gift_name, g.collection_name, g.gift_number,
-                  g.rarity, g.image_url, g.owner_id,
+                  g.rarity, g.image_url, g.owner_id, g.tg_sticker, g.tg_thumb,
                   u.username as seller_username
            FROM listings l
            JOIN gifts g ON l.gift_id=g.gift_id

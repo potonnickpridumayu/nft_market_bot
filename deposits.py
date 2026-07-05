@@ -36,6 +36,7 @@ from db.queries import (
     transfer_gift,
     update_balance,
     update_gift_meta,
+    update_gift_tg_media,
 )
 
 logger = logging.getLogger(__name__)
@@ -351,17 +352,33 @@ async def process_tg_gifts() -> None:
         owned_gift_id = g.get("owned_gift_id") or g.get("id")
         if not owned_gift_id:
             continue
-        if await get_gift_by_tg_id(owned_gift_id):
-            continue  # уже зачислен
+
+        gift_info = g.get("gift") or {}
+        # base_name — чистое имя без номера ("Sakura Flower"); name дублирует
+        # номер ("SakuraFlower-33824"), поэтому для отображения берём base_name
+        collection_name = gift_info.get("base_name") or gift_info.get("name") or "Telegram Gift"
+        gift_name = collection_name
+        number = gift_info.get("number") or g.get("number")
+        gift_number = str(number) if number else ""
+        sticker = (gift_info.get("model") or {}).get("sticker") or {}
+        tg_sticker = sticker.get("file_id") or ""
+        tg_thumb = ((sticker.get("thumbnail") or {}).get("file_id")) or ""
+
+        existing = await get_gift_by_tg_id(owned_gift_id)
+        if existing:
+            # Дообогащение задним числом: чистое имя вместо "Name-123 123"
+            # и file_id стикеров для превью/анимации
+            if gift_name and (existing["gift_name"] != gift_name
+                              or not existing["tg_sticker"]):
+                await update_gift_tg_media(
+                    existing["gift_id"], gift_name, gift_number, tg_sticker, tg_thumb
+                )
+                logger.info("🖼 TG-гифт %s дообогащён: %r #%s",
+                            existing["gift_id"], gift_name, gift_number)
+            continue
 
         # Имена полей сверяем по первым живым payload'ам — логируем целиком
         logger.info("🎁 Новый TG-подарок, raw: %s", json.dumps(g, ensure_ascii=False))
-
-        gift_info = g.get("gift") or {}
-        collection_name = gift_info.get("base_name") or gift_info.get("name") or "Telegram Gift"
-        gift_name = gift_info.get("name") or collection_name
-        number = gift_info.get("number") or g.get("number")
-        gift_number = str(number) if number else ""
 
         sender = g.get("sender_user")
         if not sender or not sender.get("id"):
@@ -374,13 +391,14 @@ async def process_tg_gifts() -> None:
                 gift_number=gift_number,
             )
             await set_gift_tg_id(gift_id, owned_gift_id)
+            await update_gift_tg_media(gift_id, gift_name, gift_number, tg_sticker, tg_thumb)
             logger.warning(
                 "🎁❓ Анонимный TG-подарок зачислен как unclaimed: gift_id=%s, owned=%s",
                 gift_id, owned_gift_id,
             )
             await _notify_admins(
                 f"⚠️ <b>Анонимный подарок в Rubuy Bank</b>\n\n"
-                f"🎁 {gift_name} {gift_number}\n"
+                f"🎁 {gift_name}{' #' + gift_number if gift_number else ''}\n"
                 f"🆔 gift_id: {gift_id}\n\n"
                 f"Отправитель скрыл личность — нужна ручная привязка к юзеру."
             )
@@ -399,14 +417,15 @@ async def process_tg_gifts() -> None:
             gift_number=gift_number,
         )
         await set_gift_tg_id(gift_id, owned_gift_id)
+        await update_gift_tg_media(gift_id, gift_name, gift_number, tg_sticker, tg_thumb)
         logger.info(
-            "✅ TG-депозит: %s %s → user %s (gift_id=%s, owned=%s)",
+            "✅ TG-депозит: %s #%s → user %s (gift_id=%s, owned=%s)",
             gift_name, gift_number, sender_id, gift_id, owned_gift_id,
         )
         await _notify_user(
             sender_id,
             f"🎁 <b>Подарок получен в Rubuy!</b>\n\n"
-            f"✨ {gift_name} {gift_number}\n"
+            f"✨ {gift_name}{' #' + gift_number if gift_number else ''}\n"
             f"Смотри в 💼 Портфеле — можно выставить на продажу "
             f"или вернуть обратно в Telegram."
         )

@@ -150,6 +150,20 @@ CREATE TABLE IF NOT EXISTS withdrawals (
 ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'processed';
 ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE deposit_intents ADD COLUMN IF NOT EXISTS from_address TEXT;
+ALTER TABLE gifts ADD COLUMN IF NOT EXISTS tg_owned_gift_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_gifts_tg_owned_gift_id
+    ON gifts (tg_owned_gift_id) WHERE tg_owned_gift_id IS NOT NULL;
+
+-- Rubuy Bank: business-подключение бота к аккаунту-сейфу (@twentop).
+-- Telegram присылает business_connection update при подключении/отключении/смене прав.
+CREATE TABLE IF NOT EXISTS business_connections (
+    connection_id      TEXT PRIMARY KEY,
+    business_user_id   BIGINT,
+    can_transfer_gifts BOOLEAN NOT NULL DEFAULT FALSE,
+    is_enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+    connected_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 """
 
 
@@ -199,7 +213,7 @@ async def update_balance(user_id: int, delta: float):
 
 # ── Gifts ─────────────────────────────────────────────────────────────────────
 
-async def add_gift(owner_id: int, collection_name: str, gift_name: str,
+async def add_gift(owner_id: Optional[int], collection_name: str, gift_name: str,
                    gift_number: str = "", rarity: str = "Common",
                    image_url: str = "", nft_address: str = "") -> int:
     pool = await get_pool()
@@ -246,6 +260,36 @@ async def get_gift_by_tg_id(tg_owned_gift_id: str):
         "SELECT * FROM gifts WHERE tg_owned_gift_id=$1",
         tg_owned_gift_id,
     )
+
+
+# ── Business connection (Rubuy Bank) ──────────────────────────────────────────
+
+async def upsert_business_connection(connection_id: str, business_user_id: Optional[int],
+                                     can_transfer_gifts: bool, is_enabled: bool):
+    pool = await get_pool()
+    await pool.execute(
+        """INSERT INTO business_connections
+               (connection_id, business_user_id, can_transfer_gifts, is_enabled, updated_at)
+           VALUES ($1,$2,$3,$4,NOW())
+           ON CONFLICT (connection_id) DO UPDATE SET
+               business_user_id=EXCLUDED.business_user_id,
+               can_transfer_gifts=EXCLUDED.can_transfer_gifts,
+               is_enabled=EXCLUDED.is_enabled,
+               updated_at=NOW()""",
+        connection_id, business_user_id, can_transfer_gifts, is_enabled,
+    )
+
+
+async def get_active_business_connection() -> Optional[dict]:
+    """Последнее живое подключение. Права на передачу могут появиться позже
+    первого подключения — поэтому фильтруем только по is_enabled."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """SELECT * FROM business_connections
+           WHERE is_enabled=TRUE
+           ORDER BY updated_at DESC LIMIT 1"""
+    )
+    return dict(row) if row else None
 
 async def get_active_listing_for_gift(gift_id: int):
     pool = await get_pool()

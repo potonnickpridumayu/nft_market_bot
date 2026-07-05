@@ -467,7 +467,7 @@ async def create_deposit_intent_endpoint(
 ADDR_RE = re.compile(r"^(-?\d+:[0-9a-fA-F]{64}|[A-Za-z0-9_-]{48})$")
 
 class WithdrawBody(BaseModel):
-    to_address: str
+    to_address: Optional[str] = None  # нужен только для ончейн-NFT
 
 @app.post("/api/gifts/{gift_id}/withdraw")
 async def withdraw_gift(
@@ -483,14 +483,35 @@ async def withdraw_gift(
     if not gift or gift.get("owner_id") != user["id"]:
         raise HTTPException(404, "Gift not found")
 
+    if await gift_is_locked(gift_id):
+        raise HTTPException(409, "Gift is on sale — cancel the listing first")
+
+    tg_owned_gift_id = gift.get("tg_owned_gift_id") or ""
+    if tg_owned_gift_id:
+        # ── Нативный Telegram-подарок: возврат на аккаунт владельца, без адреса ──
+        import tg_gifts
+        if not await tg_gifts.is_configured():
+            raise HTTPException(503, "Rubuy Bank временно недоступен, попробуйте позже")
+
+        # Снимаем владение ДО отправки, при фейле откатываем — как у ончейн-ветки
+        await set_gift_owner(gift_id, None)
+        try:
+            await tg_gifts.transfer_unique_gift(tg_owned_gift_id, user["id"])
+        except Exception as e:
+            await set_gift_owner(gift_id, user["id"])
+            logger.warning("TG gift withdraw failed for gift %s: %s", gift_id, e)
+            raise HTTPException(
+                502,
+                "Не удалось вернуть подарок в Telegram. Попробуйте позже — "
+                "гифт остался в вашем портфеле",
+            )
+        return {"ok": True, "delivered_to": "telegram"}
+
     nft_address = gift.get("nft_address") or ""
     if not nft_address:
         raise HTTPException(409, "No on-chain NFT behind this gift")
 
-    if await gift_is_locked(gift_id):
-        raise HTTPException(409, "Gift is on sale — cancel the listing first")
-
-    to_address = body.to_address.strip()
+    to_address = (body.to_address or "").strip()
     if not ADDR_RE.match(to_address):
         raise HTTPException(400, "Invalid TON address")
     if to_address == ton_client.TON_WALLET_ADDRESS:

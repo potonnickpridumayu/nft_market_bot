@@ -8,8 +8,13 @@ pending-intent продавца и кладёт подарок в его инв�
 """
 import asyncio
 import base64
+import json
+import os
 import re
 import logging
+import urllib.request
+import tg_gifts
+import bot_updates
 
 import ton_client
 from pytoniq_core import Cell
@@ -25,12 +30,17 @@ from db.queries import (
     mark_event_processed,
     touch_unmatched_event,
     get_gift_by_nft_address,
+    get_gift_by_tg_id,
+    set_gift_tg_id,
+    get_or_create_user,
     transfer_gift,
     update_balance,
     update_gift_meta,
 )
 
 logger = logging.getLogger(__name__)
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 GRACE_PERIOD = 30 * 60  # сек: сколько ждём матча несматченного трансфера
 POLL_INTERVAL = 15   # секунд между проверками
@@ -294,28 +304,137 @@ async def process_incoming_transfers() -> None:
                 )
 
 
+# ── Rubuy Bank: депозиты нативных Telegram-подарков ──────────────────────────
+
+async def _notify_user(chat_id: int, text: str) -> None:
+    """Best-effort уведомление в Telegram. Та же схема, что notify_seller
+    в api_server.py (urllib + to_thread) — чтобы не тащить aiogram в поллер."""
+    if not BOT_TOKEN:
+        return
+
+    def _send():
+        data = json.dumps({"chat_id": chat_id, "text": text,
+                           "parse_mode": "HTML"}).encode()
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            data=data, headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10).read()
+
+    try:
+        await asyncio.to_thread(_send)
+    except Exception:
+        pass
+
+
+async def _notify_admins(text: str) -> None:
+    admin_ids = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",")
+                 if x.strip().isdigit()]
+    for admin_id in admin_ids:
+        await _notify_user(admin_id, text)
+
+
+async def process_tg_gifts() -> None:
+    """Один проход: новые уникальные Telegram-подарки на бизнес-аккаунте → gifts.
+
+    В отличие от ончейн-депозита, тут нет кода/intent: атрибуция через
+    sender_user, который Telegram прикладывает к каждому owned_gift."""
+    if not await tg_gifts.is_configured():
+        return
+
+    for g in await tg_gifts.get_owned_unique_gifts():
+        owned_gift_id = g.get("owned_gift_id") or g.get("id")
+        if not owned_gift_id:
+            continue
+        if await get_gift_by_tg_id(owned_gift_id):
+            continue  # уже зачислен
+
+        # Имена полей сверяем по первым живым payload'ам — логируем целиком
+        logger.info("🎁 Новый TG-подарок, raw: %s", json.dumps(g, ensure_ascii=False))
+
+        gift_info = g.get("gift") or {}
+        collection_name = gift_info.get("base_name") or gift_info.get("name") or "Telegram Gift"
+        gift_name = gift_info.get("name") or collection_name
+        number = gift_info.get("number") or g.get("number")
+        gift_number = str(number) if number else ""
+
+        sender = g.get("sender_user")
+        if not sender or not sender.get("id"):
+            # Отправитель скрыл личность — ценность не теряем: зачисляем
+            # как unclaimed (owner NULL) и зовём админа привязать руками.
+            gift_id = await add_gift(
+                owner_id=None,
+                collection_name=collection_name,
+                gift_name=gift_name,
+                gift_number=gift_number,
+            )
+            await set_gift_tg_id(gift_id, owned_gift_id)
+            logger.warning(
+                "🎁❓ Анонимный TG-подарок зачислен как unclaimed: gift_id=%s, owned=%s",
+                gift_id, owned_gift_id,
+            )
+            await _notify_admins(
+                f"⚠️ <b>Анонимный подарок в Rubuy Bank</b>\n\n"
+                f"🎁 {gift_name} {gift_number}\n"
+                f"🆔 gift_id: {gift_id}\n\n"
+                f"Отправитель скрыл личность — нужна ручная привязка к юзеру."
+            )
+            continue
+
+        sender_id = sender["id"]
+        full_name = " ".join(
+            p for p in [sender.get("first_name"), sender.get("last_name")] if p
+        )
+        await get_or_create_user(sender_id, sender.get("username", "") or "", full_name)
+
+        gift_id = await add_gift(
+            owner_id=sender_id,
+            collection_name=collection_name,
+            gift_name=gift_name,
+            gift_number=gift_number,
+        )
+        await set_gift_tg_id(gift_id, owned_gift_id)
+        logger.info(
+            "✅ TG-депозит: %s %s → user %s (gift_id=%s, owned=%s)",
+            gift_name, gift_number, sender_id, gift_id, owned_gift_id,
+        )
+        await _notify_user(
+            sender_id,
+            f"🎁 <b>Подарок получен в Rubuy!</b>\n\n"
+            f"✨ {gift_name} {gift_number}\n"
+            f"Смотри в 💼 Портфеле — можно выставить на продажу "
+            f"или вернуть обратно в Telegram."
+        )
+
+
 async def poll_loop() -> None:
     """Бесконечный цикл поллера. Запускается из lifespan FastAPI."""
     logger.info("🔄 Поллер депозитов запущен (интервал %s сек)", POLL_INTERVAL)
-    steps = (
+    ton_steps = (
         ("nft_transfers", process_incoming_transfers),
         ("ton_deposits", process_ton_deposits),
         ("withdrawal_refunds", process_withdrawal_refunds),
     )
+    # Rubuy Bank и апдейты бота от TON-конфига не зависят
+    tg_steps = (
+        ("bot_updates", bot_updates.poll_bot_updates),
+        ("tg_gifts", process_tg_gifts),
+    )
     while True:
         try:
-            if ton_client.is_configured():
-                # каждый шаг изолирован: сбой одного (например, 401 от
-                # /nft/transfers) не блокирует депозиты TON и рефанды
-                for step_name, step in steps:
-                    try:
-                        await step()
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        logger.warning(
-                            "Поллер [%s]: %s: %s", step_name, e.__class__.__name__, e
-                        )
+            steps = (ton_steps if ton_client.is_configured() else ()) + tg_steps
+            # каждый шаг изолирован: сбой одного (например, 401 от
+            # /nft/transfers) не блокирует депозиты TON и рефанды
+            for step_name, step in steps:
+                try:
+                    await step()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        "Поллер [%s]: %s: %s", step_name, e.__class__.__name__, e
+                    )
         except asyncio.CancelledError:
             logger.info("Поллер депозитов остановлен")
             raise

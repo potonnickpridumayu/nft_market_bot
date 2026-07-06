@@ -364,10 +364,13 @@ async def process_tg_gifts() -> None:
         tg_sticker = sticker.get("file_id") or ""
         tg_thumb = ((sticker.get("thumbnail") or {}).get("file_id")) or ""
 
-        # Фон подарка: цвета градиента + стикер-узор (symbol) для повторения
-        colors = (gift_info.get("backdrop") or {}).get("colors") or {}
-        symbol_thumb = ((((gift_info.get("symbol") or {}).get("sticker") or {})
-                        .get("thumbnail")) or {}).get("file_id") or ""
+        # Фон подарка: цвета градиента + стикер-узор + названия атрибутов
+        # (модель/фон/символ — по ним работают фильтры маркета)
+        backdrop_info = gift_info.get("backdrop") or {}
+        colors = backdrop_info.get("colors") or {}
+        symbol_info = gift_info.get("symbol") or {}
+        symbol_thumb = ((symbol_info.get("sticker") or {})
+                        .get("thumbnail") or {}).get("file_id") or ""
         tg_backdrop = ""
         if colors:
             tg_backdrop = json.dumps({
@@ -375,15 +378,18 @@ async def process_tg_gifts() -> None:
                 "edge": colors.get("edge_color"),
                 "symbol": colors.get("symbol_color"),
                 "pattern": symbol_thumb,
+                "model_name": (gift_info.get("model") or {}).get("name") or "",
+                "backdrop_name": backdrop_info.get("name") or "",
+                "symbol_name": symbol_info.get("name") or "",
             })
 
         existing = await get_gift_by_tg_id(owned_gift_id)
         if existing:
             # Дообогащение задним числом: чистое имя вместо "Name-123 123",
-            # file_id стикеров для превью/анимации, фон с узором
+            # file_id стикеров, фон с узором и атрибутами
             if gift_name and (existing["gift_name"] != gift_name
                               or not existing["tg_sticker"]
-                              or (tg_backdrop and not existing["tg_backdrop"])):
+                              or (tg_backdrop and existing["tg_backdrop"] != tg_backdrop)):
                 await update_gift_tg_media(
                     existing["gift_id"], gift_name, gift_number,
                     tg_sticker, tg_thumb, tg_backdrop,

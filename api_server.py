@@ -618,6 +618,37 @@ async def withdraw_balance(
 
     return {"ok": True, "tx": tx, "amount": amount, "sent_to": to_address, "wd_id": wd_id}
 
+class PriceBody(BaseModel):
+    price: float
+
+
+@app.post("/api/listings/{listing_id}/price")
+async def change_listing_price(
+        listing_id: int,
+        body: PriceBody,
+        x_telegram_init_data: Optional[str] = Header(None),
+):
+    """Смена цены своего активного лота."""
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Unauthorized")
+    if body.price <= 0:
+        raise HTTPException(400, "Цена должна быть больше нуля")
+
+    listing = await get_listing(listing_id)
+    if not listing:
+        raise HTTPException(404, "Listing not found")
+    if listing["seller_id"] != user["id"]:
+        raise HTTPException(403, "Not your listing")
+    if listing["status"] != "active":
+        raise HTTPException(409, "Listing is not active")
+
+    price = round(body.price, 4)
+    if not await set_listing_price(listing_id, price):
+        raise HTTPException(409, "Listing is not active")
+    return {"ok": True, "price": price}
+
+
 @app.post("/api/escrow/withdraw/{listing_id}")
 async def withdraw_listing(
         listing_id: int,

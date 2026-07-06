@@ -372,6 +372,30 @@ async def get_active_listings(limit: int = 20, offset: int = 0,
     return [dict(r) for r in rows]
 
 
+async def set_listing_price(listing_id: int, price: float) -> bool:
+    """Смена цены активного лота владельцем. True = обновлено."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """UPDATE listings SET price_ton=$1
+           WHERE listing_id=$2 AND status='active'
+           RETURNING listing_id""",
+        price, listing_id,
+    )
+    return row is not None
+
+
+async def expire_stale_intents(hours: int = 24) -> int:
+    """Заявки на NFT-депозит, по которым так и не пришёл трансфер, истекают.
+    Денег они не держат — чистка чисто гигиеническая."""
+    pool = await get_pool()
+    result = await pool.execute(
+        """UPDATE deposit_intents SET status='expired'
+           WHERE status='pending' AND created_at < NOW() - make_interval(hours => $1)""",
+        hours,
+    )
+    return int(result.split()[-1] or 0)
+
+
 async def get_listing(listing_id: int) -> Optional[dict]:
     pool = await get_pool()
     row = await pool.fetchrow(

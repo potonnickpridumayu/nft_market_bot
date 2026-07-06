@@ -364,14 +364,29 @@ async def process_tg_gifts() -> None:
         tg_sticker = sticker.get("file_id") or ""
         tg_thumb = ((sticker.get("thumbnail") or {}).get("file_id")) or ""
 
+        # Фон подарка: цвета градиента + стикер-узор (symbol) для повторения
+        colors = (gift_info.get("backdrop") or {}).get("colors") or {}
+        symbol_thumb = ((((gift_info.get("symbol") or {}).get("sticker") or {})
+                        .get("thumbnail")) or {}).get("file_id") or ""
+        tg_backdrop = ""
+        if colors:
+            tg_backdrop = json.dumps({
+                "center": colors.get("center_color"),
+                "edge": colors.get("edge_color"),
+                "symbol": colors.get("symbol_color"),
+                "pattern": symbol_thumb,
+            })
+
         existing = await get_gift_by_tg_id(owned_gift_id)
         if existing:
-            # Дообогащение задним числом: чистое имя вместо "Name-123 123"
-            # и file_id стикеров для превью/анимации
+            # Дообогащение задним числом: чистое имя вместо "Name-123 123",
+            # file_id стикеров для превью/анимации, фон с узором
             if gift_name and (existing["gift_name"] != gift_name
-                              or not existing["tg_sticker"]):
+                              or not existing["tg_sticker"]
+                              or (tg_backdrop and not existing["tg_backdrop"])):
                 await update_gift_tg_media(
-                    existing["gift_id"], gift_name, gift_number, tg_sticker, tg_thumb
+                    existing["gift_id"], gift_name, gift_number,
+                    tg_sticker, tg_thumb, tg_backdrop,
                 )
                 logger.info("🖼 TG-гифт %s дообогащён: %r #%s",
                             existing["gift_id"], gift_name, gift_number)
@@ -391,7 +406,8 @@ async def process_tg_gifts() -> None:
                 gift_number=gift_number,
             )
             await set_gift_tg_id(gift_id, owned_gift_id)
-            await update_gift_tg_media(gift_id, gift_name, gift_number, tg_sticker, tg_thumb)
+            await update_gift_tg_media(gift_id, gift_name, gift_number,
+                                   tg_sticker, tg_thumb, tg_backdrop)
             logger.warning(
                 "🎁❓ Анонимный TG-подарок зачислен как unclaimed: gift_id=%s, owned=%s",
                 gift_id, owned_gift_id,
@@ -417,7 +433,8 @@ async def process_tg_gifts() -> None:
             gift_number=gift_number,
         )
         await set_gift_tg_id(gift_id, owned_gift_id)
-        await update_gift_tg_media(gift_id, gift_name, gift_number, tg_sticker, tg_thumb)
+        await update_gift_tg_media(gift_id, gift_name, gift_number,
+                                   tg_sticker, tg_thumb, tg_backdrop)
         logger.info(
             "✅ TG-депозит: %s #%s → user %s (gift_id=%s, owned=%s)",
             gift_name, gift_number, sender_id, gift_id, owned_gift_id,

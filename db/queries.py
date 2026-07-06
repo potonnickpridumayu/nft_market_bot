@@ -153,6 +153,7 @@ ALTER TABLE deposit_intents ADD COLUMN IF NOT EXISTS from_address TEXT;
 ALTER TABLE gifts ADD COLUMN IF NOT EXISTS tg_owned_gift_id TEXT;
 ALTER TABLE gifts ADD COLUMN IF NOT EXISTS tg_sticker TEXT;   -- file_id анимации (tgs/webm)
 ALTER TABLE gifts ADD COLUMN IF NOT EXISTS tg_thumb TEXT;     -- file_id статичной превьюшки
+ALTER TABLE gifts ADD COLUMN IF NOT EXISTS tg_backdrop TEXT;  -- JSON: цвета фона + file_id узора
 CREATE UNIQUE INDEX IF NOT EXISTS uq_gifts_tg_owned_gift_id
     ON gifts (tg_owned_gift_id) WHERE tg_owned_gift_id IS NOT NULL;
 
@@ -321,13 +322,14 @@ async def update_gift_meta(gift_id: int, gift_name: str, image_url: str):
 
 
 async def update_gift_tg_media(gift_id: int, gift_name: str, gift_number: str,
-                               tg_sticker: str, tg_thumb: str):
-    """Дообогащение TG-гифта: чистое имя (без дубля номера) и file_id стикеров."""
+                               tg_sticker: str, tg_thumb: str, tg_backdrop: str = ""):
+    """Дообогащение TG-гифта: чистое имя, file_id стикеров, фон с узором."""
     pool = await get_pool()
     await pool.execute(
-        """UPDATE gifts SET gift_name=$1, gift_number=$2, tg_sticker=$3, tg_thumb=$4
-           WHERE gift_id=$5""",
-        gift_name, gift_number, tg_sticker, tg_thumb, gift_id,
+        """UPDATE gifts SET gift_name=$1, gift_number=$2, tg_sticker=$3, tg_thumb=$4,
+               tg_backdrop=$5
+           WHERE gift_id=$6""",
+        gift_name, gift_number, tg_sticker, tg_thumb, tg_backdrop, gift_id,
     )
 
 
@@ -348,7 +350,7 @@ async def get_active_listings(limit: int = 20, offset: int = 0,
     pool = await get_pool()
     query = """
         SELECT l.*, g.gift_name, g.collection_name, g.gift_number,
-               g.rarity, g.image_url, g.tg_sticker, g.tg_thumb,
+               g.rarity, g.image_url, g.tg_sticker, g.tg_thumb, g.tg_backdrop,
                u.username as seller_username
         FROM listings l
         JOIN gifts g ON l.gift_id = g.gift_id
@@ -374,7 +376,7 @@ async def get_listing(listing_id: int) -> Optional[dict]:
     pool = await get_pool()
     row = await pool.fetchrow(
         """SELECT l.*, g.gift_name, g.collection_name, g.gift_number,
-                  g.rarity, g.image_url, g.owner_id, g.tg_sticker, g.tg_thumb,
+                  g.rarity, g.image_url, g.owner_id, g.tg_sticker, g.tg_thumb, g.tg_backdrop,
                   u.username as seller_username
            FROM listings l
            JOIN gifts g ON l.gift_id=g.gift_id

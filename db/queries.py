@@ -206,6 +206,18 @@ async def get_user(user_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+async def try_charge_balance(user_id: int, amount: float) -> bool:
+    """Атомарно списать amount, только если хватает баланса. True = списано."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """UPDATE users SET balance_ton = balance_ton - $1
+           WHERE user_id = $2 AND balance_ton >= $1
+           RETURNING user_id""",
+        amount, user_id,
+    )
+    return row is not None
+
+
 async def update_balance(user_id: int, delta: float):
     pool = await get_pool()
     await pool.execute(

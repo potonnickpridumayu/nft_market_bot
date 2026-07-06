@@ -33,7 +33,12 @@ from db.queries import (
     get_active_listing_for_gift, get_referral_stats,
     # админ-ручки:
     get_pool,
+    # комиссия за вывод гифта:
+    try_charge_balance,
 )
+
+# Комиссия (GRAM) за вывод нативного TG-подарка — окупает 25 Stars трансфера
+GIFT_WITHDRAW_FEE: float = float(os.getenv("GIFT_WITHDRAW_FEE_TON", "0.2"))
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -495,19 +500,33 @@ async def withdraw_gift(
         if not await tg_gifts.is_configured():
             raise HTTPException(503, "Rubuy Bank временно недоступен, попробуйте позже")
 
-        # Снимаем владение ДО отправки, при фейле откатываем — как у ончейн-ветки
+        # Комиссия за передачу: покрывает Stars, которые Telegram списывает
+        # с бизнес-аккаунта за transferGift. Списываем до отправки, при фейле
+        # возвращаем вместе с владением.
+        fee = GIFT_WITHDRAW_FEE
+        if fee > 0 and not await try_charge_balance(user["id"], fee):
+            raise HTTPException(
+                402,
+                f"Для вывода нужно {fee:g} GRAM на балансе — "
+                f"комиссия за передачу подарка",
+            )
+
         await set_gift_owner(gift_id, None)
         try:
             await tg_gifts.transfer_unique_gift(tg_owned_gift_id, user["id"])
         except Exception as e:
             await set_gift_owner(gift_id, user["id"])
+            if fee > 0:
+                await update_balance(user["id"], fee)
             logger.warning("TG gift withdraw failed for gift %s: %s", gift_id, e)
             raise HTTPException(
                 502,
                 "Не удалось вернуть подарок в Telegram. Попробуйте позже — "
-                "гифт остался в вашем портфеле",
+                "гифт остался в вашем портфеле, комиссия возвращена",
             )
-        return {"ok": True, "delivered_to": "telegram"}
+        logger.info("🎁➡️ Вывод гифта %s → user %s (комиссия %.2f)",
+                    gift_id, user["id"], fee)
+        return {"ok": True, "delivered_to": "telegram", "fee": fee}
 
     nft_address = gift.get("nft_address") or ""
     if not nft_address:

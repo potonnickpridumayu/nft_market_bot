@@ -389,6 +389,10 @@ async def process_tg_gifts() -> None:
                 "model_name": (gift_info.get("model") or {}).get("name") or "",
                 "backdrop_name": backdrop_info.get("name") or "",
                 "symbol_name": symbol_info.get("name") or "",
+                # редкость атрибута в промилле (÷10 = проценты на фронте)
+                "model_rarity": (gift_info.get("model") or {}).get("rarity_per_mille"),
+                "backdrop_rarity": backdrop_info.get("rarity_per_mille"),
+                "symbol_rarity": symbol_info.get("rarity_per_mille"),
             })
 
         existing = await get_gift_by_tg_id(owned_gift_id)

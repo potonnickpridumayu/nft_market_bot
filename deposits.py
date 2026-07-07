@@ -59,6 +59,15 @@ DEPOSIT_PREFIX = "GS-DEP-"
 MIN_DEPOSIT_TON = 0.05  # отсечка от пыли и случайных переводов
 
 
+def _gift_slug_from(name: str, number) -> str:
+    """Собирает слаг t.me/nft из имени коллекции и номера — те же правила,
+    что и gift_slug_from в api_server.py (дублируется, т.к. импорт оттуда
+    сюда дал бы циклическую зависимость: api_server.py импортирует deposits.py)."""
+    num = re.sub(r"[#\s]", "", str(number or ""))
+    nm = re.sub(r"\s+", "", str(name or ""))
+    return f"{nm}-{num}" if nm and num else ""
+
+
 def decode_tx_comment(tx: dict) -> str | None:
     """Текстовый комментарий из обычного входящего TON-перевода."""
     in_msg = tx.get("in_msg") or {}
@@ -457,12 +466,20 @@ async def process_tg_gifts() -> None:
             "✅ TG-депозит: %s #%s → user %s (gift_id=%s, owned=%s)",
             gift_name, gift_number, sender_id, gift_id, owned_gift_id,
         )
+        # Ссылка на подарок (t.me/nft/<slug>) — у Rubuy Bank подарков nft_address
+        # пуст, слаг собираем из имени+номера, как и в остальных уведомлениях.
+        gift_slug = _gift_slug_from(gift_name, gift_number)
+        link_line = (
+            f'\n🔗 <a href="https://t.me/nft/{gift_slug}">t.me/nft/{gift_slug}</a>'
+            if gift_slug else ""
+        )
         await _notify_user(
             sender_id,
             f"🎁 <b>Подарок получен в Rubuy!</b>\n\n"
             f"✨ {gift_name}{' #' + gift_number if gift_number else ''}\n"
             f"Смотри в 💼 Портфеле — можно выставить на продажу "
             f"или вернуть обратно в Telegram."
+            + link_line
         )
 
 

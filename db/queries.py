@@ -822,6 +822,30 @@ async def get_user_transactions(user_id: int, limit: int = 10) -> list:
     return [dict(r) for r in rows]
 
 
+async def get_user_completed_trades(user_id: int, limit: int = 10) -> list:
+    """Завершённые обмены (принятые офферы), где пользователь — любая из сторон."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT o.offer_id, o.resolved_at as completed_at, o.top_up_ton,
+                  o.from_user_id, t.owner_id as to_user_id,
+                  tg.gift_name as target_gift_name, tg.gift_number as target_gift_number,
+                  tg.nft_address as target_nft_address,
+                  og.gift_name as offered_gift_name, og.gift_number as offered_gift_number,
+                  og.nft_address as offered_nft_address,
+                  ufrom.username as from_username, uto.username as to_username
+           FROM trade_offers o
+           JOIN trade_listings t ON o.trade_id = t.trade_id
+           JOIN gifts tg ON t.gift_id = tg.gift_id
+           JOIN gifts og ON o.offered_gift_id = og.gift_id
+           JOIN users ufrom ON o.from_user_id = ufrom.user_id
+           JOIN users uto ON t.owner_id = uto.user_id
+           WHERE o.status='accepted' AND (o.from_user_id=$1 OR t.owner_id=$1)
+           ORDER BY o.resolved_at DESC LIMIT $2""",
+        user_id, limit,
+    )
+    return [dict(r) for r in rows]
+
+
 # ── Офферы по цене на лоты Маркета ───────────────────────────────────────────
 
 async def create_listing_offer(listing_id: int, from_user_id: int, amount_ton: float) -> int:
@@ -1150,7 +1174,8 @@ async def set_gift_owner(gift_id: int, owner_id: Optional[int]):
 
 
 async def gift_is_locked(gift_id: int) -> bool:
-    """Гифт занят активным лотом, аукционом или обменом — выводить/перевыставлять нельзя."""
+    """Гифт занят активным лотом, аукционом, обменом или уже приложен к
+    ожидающему предложению обмена — выводить/перевыставлять нельзя."""
     pool = await get_pool()
     return await pool.fetchval(
         """SELECT EXISTS(SELECT 1 FROM listings
@@ -1158,7 +1183,9 @@ async def gift_is_locked(gift_id: int) -> bool:
                OR EXISTS(SELECT 1 FROM auctions
                          WHERE gift_id=$1 AND status='active')
                OR EXISTS(SELECT 1 FROM trade_listings
-                         WHERE gift_id=$1 AND status='active')""",
+                         WHERE gift_id=$1 AND status='active')
+               OR EXISTS(SELECT 1 FROM trade_offers
+                         WHERE offered_gift_id=$1 AND status='pending')""",
         gift_id,
     )
 

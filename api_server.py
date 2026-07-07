@@ -47,6 +47,8 @@ from db.queries import (
     # офферы по цене на лоты маркета:
     create_listing_offer, get_listing_offer, get_user_listing_offers,
     decline_listing_offer, cancel_listing_offer, accept_listing_offer,
+    # завершённые обмены для истории сделок:
+    get_user_completed_trades,
 )
 
 # Комиссия (GRAM) за вывод нативного TG-подарка — окупает 25 Stars трансфера
@@ -752,10 +754,16 @@ async def profile(x_telegram_init_data: Optional[str] = Header(None)):
         raise HTTPException(401, "Unauthorized")
     db_user = await get_user(user["id"])
     txs = await get_user_transactions(user["id"], limit=10)
+    trades = await get_user_completed_trades(user["id"], limit=10)
+    for tx in txs:
+        tx["kind"] = "sale"
+    for tr in trades:
+        tr["kind"] = "trade"
+    history = sorted(txs + trades, key=lambda x: x["completed_at"], reverse=True)[:10]
     trade_offers = await get_user_trade_offers(user["id"])
     listing_offers = await get_user_listing_offers(user["id"])
     pending = len(trade_offers["incoming"]) + len(listing_offers["incoming"])
-    return {"user": db_user, "transactions": txs, "pending_offers": pending}
+    return {"user": db_user, "transactions": history, "pending_offers": pending}
 
 
 # ===== STATS =====

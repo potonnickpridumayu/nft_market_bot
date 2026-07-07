@@ -370,7 +370,8 @@ async def buy_listing(
         lst.get("gift_name"), lst.get("gift_number")
     )
     gift_link = f"https://t.me/nft/{gift_slug}" if gift_slug else ""
-    link_line = f'\n🔗 <a href="{gift_link}">Открыть подарок</a>' if gift_link else ""
+    # Просто ссылка — Telegram сам подтягивает карточку-превью подарка.
+    link_line = f"\n🔗 {gift_link}" if gift_link else ""
 
     # Уведомление продавцу (best-effort)
     buyer_name = tg_user.get("username") or tg_user.get("first_name") or "покупатель"
@@ -380,6 +381,7 @@ async def buy_listing(
         f"🎁 {lst['gift_name']} #{lst.get('gift_number','?')}\n"
         f"💰 Вы получили: {seller_net:.4f} TON\n"
         f"👤 Покупатель: @{buyer_name}"
+        + link_line
     )
 
     # Уведомление покупателю со ссылкой на подарок (best-effort)

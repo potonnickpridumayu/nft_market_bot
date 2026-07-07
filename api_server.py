@@ -31,6 +31,8 @@ from db.queries import (
     create_withdrawal, mark_withdrawal_sent,
     # гард от дублей лотов:
     get_active_listing_for_gift, get_referral_stats,
+    # смена цены лота:
+    set_listing_price,
     # админ-ручки:
     get_pool,
     # комиссия за вывод гифта:

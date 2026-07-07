@@ -647,6 +647,12 @@ async def create_trade_offer_endpoint(
         raise HTTPException(401, "Unauthorized")
     if body.top_up_ton < 0:
         raise HTTPException(400, "top_up_ton must be >= 0")
+    if body.top_up_ton > 0:
+        db_user = await get_user(user["id"])
+        if not db_user or db_user["balance_ton"] < body.top_up_ton:
+            raise HTTPException(
+                400, f"Недостаточно баланса для доплаты: нужно {body.top_up_ton:.2f} GRAM"
+            )
 
     trade = await get_trade_listing(trade_id)
     if not trade or trade["status"] != "active":

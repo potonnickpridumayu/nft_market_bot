@@ -129,6 +129,15 @@ def parse_gift_url(url: str) -> Optional[dict]:
     return {"slug": slug, "collection": collection, "number": number}
 
 
+def gift_slug_from(name: str, number) -> str:
+    """Собирает слаг t.me/nft из имени коллекции и номера.
+    "Sakura Flower" + "33824"/"#33824" -> "SakuraFlower-33824".
+    Нужен для подарков из Rubuy Bank, у которых nft_address пуст."""
+    num = re.sub(r"[#\s]", "", str(number or ""))
+    nm = re.sub(r"\s+", "", str(name or ""))
+    return f"{nm}-{num}" if nm and num else ""
+
+
 def fetch_gift_meta(url: str) -> dict:
     """Best-effort: тянем og:title и og:image со страницы подарка.
     Никогда не роняет создание лота — при любой ошибке возвращаем {}."""
@@ -353,8 +362,11 @@ async def buy_listing(
         await update_balance(seller["referred_by"], ref_bonus)
         await record_referral_payout(seller["referred_by"], seller_id, tx_id, ref_bonus)
 
-    # Ссылка на сам подарок (t.me/nft/<slug>), если слаг известен
-    gift_slug = (lst.get("nft_address") or "").strip()
+    # Ссылка на сам подарок (t.me/nft/<slug>). Для подарков из Rubuy Bank
+    # nft_address пуст — собираем слаг из имени и номера.
+    gift_slug = (lst.get("nft_address") or "").strip() or gift_slug_from(
+        lst.get("gift_name"), lst.get("gift_number")
+    )
     gift_link = f"https://t.me/nft/{gift_slug}" if gift_slug else ""
     link_line = f'\n🔗 <a href="{gift_link}">Открыть подарок</a>' if gift_link else ""
 

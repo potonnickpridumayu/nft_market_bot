@@ -536,7 +536,7 @@ async def record_transaction(buyer_id: int, seller_id: int, gift_id: int,
 async def get_user_transactions(user_id: int, limit: int = 10) -> list:
     pool = await get_pool()
     rows = await pool.fetch(
-        """SELECT t.*, g.gift_name, g.collection_name,
+        """SELECT t.*, g.gift_name, g.collection_name, g.gift_number, g.nft_address,
                   b.username as buyer_username, s.username as seller_username
            FROM transactions t
            JOIN gifts g ON t.gift_id=g.gift_id

@@ -239,8 +239,8 @@ async def create_listing_endpoint(
         gift = await get_gift(body.gift_id)
         if not gift or gift["owner_id"] != user["id"]:
             raise HTTPException(404, "Gift not found or not yours")
-        if await get_active_listing_for_gift(body.gift_id):
-            raise HTTPException(409, "Этот подарок уже выставлен на продажу")
+        if await gift_is_locked(body.gift_id):
+            raise HTTPException(409, "Этот подарок уже занят (продажа/аукцион/обмен)")
         try:
             listing_id = await create_listing(
                 gift_id=body.gift_id,

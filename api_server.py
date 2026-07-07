@@ -444,7 +444,11 @@ async def create_listing_offer_endpoint(
         raise HTTPException(400, f"Оффер не может быть меньше {min_amount:.2f} GRAM (50% цены)")
 
     full_name = " ".join(p for p in [user.get("first_name"), user.get("last_name")] if p)
-    await get_or_create_user(user["id"], user.get("username", ""), full_name)
+    db_user = await get_or_create_user(user["id"], user.get("username", ""), full_name)
+    if db_user["balance_ton"] < body.amount_ton:
+        raise HTTPException(
+            400, f"Недостаточно средств: баланс {db_user['balance_ton']:.2f} GRAM, нужно {body.amount_ton:.2f}"
+        )
 
     offer_id = await create_listing_offer(listing_id, user["id"], body.amount_ton)
 

@@ -11,6 +11,7 @@ import base64
 import json
 import os
 import re
+import time
 import logging
 import urllib.request
 import tg_gifts
@@ -25,6 +26,7 @@ from db.queries import (
     confirm_withdrawal,
     refund_stale_withdrawals,
     complete_deposit_intent,
+    expire_stale_intents,
     get_pending_intent_by_code,
     is_event_processed,
     mark_event_processed,
@@ -46,6 +48,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 GRACE_PERIOD = 30 * 60  # сек: сколько ждём матча несматченного трансфера
 POLL_INTERVAL = 15   # секунд между проверками
 BATCH_LIMIT = 20     # сколько последних трансферов смотрим за раз
+
+# Брошенные заявки на депозит (pending, NFT так и не пришёл) гасим,
+# чтобы они не висели вечно. Денег не держат — чистка гигиеническая.
+INTENT_EXPIRE_HOURS = int(os.getenv("DEPOSIT_INTENT_EXPIRE_HOURS", "24"))
+INTENT_SWEEP_INTERVAL = 3600  # раз в час достаточно
+_last_intent_sweep = 0.0
 
 DEPOSIT_PREFIX = "GS-DEP-"
 MIN_DEPOSIT_TON = 0.05  # отсечка от пыли и случайных переводов
@@ -454,6 +462,19 @@ async def process_tg_gifts() -> None:
         )
 
 
+async def sweep_stale_intents() -> None:
+    """Гасит брошенные pending-заявки на депозит (старше INTENT_EXPIRE_HOURS).
+    Троттлится до раза в час — это дешёвый UPDATE, но незачем гонять каждые 15с."""
+    global _last_intent_sweep
+    now = time.monotonic()
+    if now - _last_intent_sweep < INTENT_SWEEP_INTERVAL:
+        return
+    _last_intent_sweep = now
+    n = await expire_stale_intents(INTENT_EXPIRE_HOURS)
+    if n:
+        logger.info("🧹 Истекло брошенных заявок на депозит: %s", n)
+
+
 async def poll_loop() -> None:
     """Бесконечный цикл поллера. Запускается из lifespan FastAPI."""
     logger.info("🔄 Поллер депозитов запущен (интервал %s сек)", POLL_INTERVAL)
@@ -462,10 +483,11 @@ async def poll_loop() -> None:
         ("ton_deposits", process_ton_deposits),
         ("withdrawal_refunds", process_withdrawal_refunds),
     )
-    # Rubuy Bank и апдейты бота от TON-конфига не зависят
+    # Rubuy Bank, апдейты бота и чистка заявок от TON-конфига не зависят
     tg_steps = (
         ("bot_updates", bot_updates.poll_bot_updates),
         ("tg_gifts", process_tg_gifts),
+        ("expire_intents", sweep_stale_intents),
     )
     while True:
         try:

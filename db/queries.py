@@ -350,7 +350,7 @@ async def get_active_listings(limit: int = 20, offset: int = 0,
     pool = await get_pool()
     query = """
         SELECT l.*, g.gift_name, g.collection_name, g.gift_number,
-               g.rarity, g.image_url, g.tg_sticker, g.tg_thumb, g.tg_backdrop,
+               g.rarity, g.image_url, g.nft_address, g.tg_sticker, g.tg_thumb, g.tg_backdrop,
                u.username as seller_username
         FROM listings l
         JOIN gifts g ON l.gift_id = g.gift_id
@@ -400,7 +400,7 @@ async def get_listing(listing_id: int) -> Optional[dict]:
     pool = await get_pool()
     row = await pool.fetchrow(
         """SELECT l.*, g.gift_name, g.collection_name, g.gift_number,
-                  g.rarity, g.image_url, g.owner_id, g.tg_sticker, g.tg_thumb, g.tg_backdrop,
+                  g.rarity, g.image_url, g.nft_address, g.owner_id, g.tg_sticker, g.tg_thumb, g.tg_backdrop,
                   u.username as seller_username
            FROM listings l
            JOIN gifts g ON l.gift_id=g.gift_id

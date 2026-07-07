@@ -353,6 +353,11 @@ async def buy_listing(
         await update_balance(seller["referred_by"], ref_bonus)
         await record_referral_payout(seller["referred_by"], seller_id, tx_id, ref_bonus)
 
+    # Ссылка на сам подарок (t.me/nft/<slug>), если слаг известен
+    gift_slug = (lst.get("nft_address") or "").strip()
+    gift_link = f"https://t.me/nft/{gift_slug}" if gift_slug else ""
+    link_line = f'\n🔗 <a href="{gift_link}">Открыть подарок</a>' if gift_link else ""
+
     # Уведомление продавцу (best-effort)
     buyer_name = tg_user.get("username") or tg_user.get("first_name") or "покупатель"
     await notify_seller(
@@ -361,6 +366,15 @@ async def buy_listing(
         f"🎁 {lst['gift_name']} #{lst.get('gift_number','?')}\n"
         f"💰 Вы получили: {seller_net:.4f} TON\n"
         f"👤 Покупатель: @{buyer_name}"
+    )
+
+    # Уведомление покупателю со ссылкой на подарок (best-effort)
+    await notify_seller(
+        buyer_id,
+        f"✅ <b>Покупка совершена!</b>\n\n"
+        f"🎁 {lst['gift_name']} #{lst.get('gift_number','?')}\n"
+        f"💰 Списано: {price:.4f} TON"
+        + link_line
     )
 
     return {

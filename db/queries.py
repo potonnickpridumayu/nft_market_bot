@@ -335,7 +335,7 @@ async def get_active_business_connection() -> Optional[dict]:
 async def get_active_listing_for_gift(gift_id: int):
     pool = await get_pool()
     return await pool.fetchrow(
-        "SELECT listing_id FROM listings WHERE gift_id=$1 AND status='active'",
+        "SELECT * FROM listings WHERE gift_id=$1 AND status='active'",
         gift_id,
     )
 

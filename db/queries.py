@@ -6,6 +6,7 @@
 данные больше не слетают при редеплоях Railway.
 """
 import os
+import json
 import logging
 import secrets
 from typing import Optional
@@ -13,6 +14,13 @@ from typing import Optional
 import asyncpg
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_json_list(v):
+    """asyncpg возвращает json/jsonb как сырую строку — декодируем в список."""
+    if v is None:
+        return []
+    return json.loads(v) if isinstance(v, str) else v
 
 # ── Пул соединений ─────────────────────────────────────────────────────────────
 # Один общий пул на процесс. Ленивая инициализация: создаётся при первом обращении
@@ -193,6 +201,32 @@ CREATE TABLE IF NOT EXISTS trade_offers (
 CREATE INDEX IF NOT EXISTS idx_trade_listings_status ON trade_listings(status);
 CREATE INDEX IF NOT EXISTS idx_trade_offers_trade     ON trade_offers(trade_id);
 CREATE INDEX IF NOT EXISTS idx_trade_offers_from      ON trade_offers(from_user_id);
+
+-- Мульти-подарочный обмен: и лот, и оффер могут содержать несколько подарков
+-- одной стороны. trade_listings.gift_id / trade_offers.offered_gift_id остаются
+-- в схеме (старые строки), но новые строки эти колонки не используют —
+-- источник истины теперь эти junction-таблицы.
+CREATE TABLE IF NOT EXISTS trade_listing_gifts (
+    trade_id BIGINT REFERENCES trade_listings(trade_id),
+    gift_id  BIGINT REFERENCES gifts(gift_id),
+    PRIMARY KEY (trade_id, gift_id)
+);
+CREATE TABLE IF NOT EXISTS trade_offer_gifts (
+    offer_id BIGINT REFERENCES trade_offers(offer_id),
+    gift_id  BIGINT REFERENCES gifts(gift_id),
+    PRIMARY KEY (offer_id, gift_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trade_listing_gifts_gift ON trade_listing_gifts(gift_id);
+CREATE INDEX IF NOT EXISTS idx_trade_offer_gifts_gift   ON trade_offer_gifts(gift_id);
+
+-- Бэкофилл старых одно-подарочных строк в junction-таблицы. Идемпотентно —
+-- безопасно гонять на каждом старте.
+INSERT INTO trade_listing_gifts (trade_id, gift_id)
+    SELECT trade_id, gift_id FROM trade_listings WHERE gift_id IS NOT NULL
+    ON CONFLICT DO NOTHING;
+INSERT INTO trade_offer_gifts (offer_id, gift_id)
+    SELECT offer_id, offered_gift_id FROM trade_offers WHERE offered_gift_id IS NOT NULL
+    ON CONFLICT DO NOTHING;
 
 -- Офферы по цене на обычные лоты Маркета: покупатель предлагает свою цену
 -- (не ниже 50% цены лота, см. api_server.py), продавец принимает/отклоняет.
@@ -547,55 +581,72 @@ async def end_auction(auction_id: int):
     )
 
 
-# ── Обмен (trades) ────────────────────────────────────────────────────────────
+# ── Обмен (trades) — мульти-подарочный: и лот, и оффер — списки подарков ──────
 
-TRADE_LISTING_FIELDS = """
-    t.*, g.gift_name, g.collection_name, g.gift_number, g.rarity,
-    g.image_url, g.nft_address, g.tg_sticker, g.tg_thumb, g.tg_backdrop,
-    u.username as owner_username
+_GIFT_JSON = """json_build_object(
+    'gift_id', g.gift_id, 'gift_name', g.gift_name, 'collection_name', g.collection_name,
+    'gift_number', g.gift_number, 'rarity', g.rarity, 'image_url', g.image_url,
+    'nft_address', g.nft_address, 'tg_sticker', g.tg_sticker, 'tg_thumb', g.tg_thumb,
+    'tg_backdrop', g.tg_backdrop
+)"""
+
+_TRADE_LISTING_SELECT = f"""
+    SELECT t.trade_id, t.owner_id, t.note, t.status, t.created_at,
+           u.username as owner_username,
+           (SELECT json_agg({_GIFT_JSON} ORDER BY g.gift_id)
+            FROM trade_listing_gifts tlg JOIN gifts g ON g.gift_id=tlg.gift_id
+            WHERE tlg.trade_id=t.trade_id) as gifts
+    FROM trade_listings t
+    JOIN users u ON t.owner_id = u.user_id
 """
 
 
-async def create_trade_listing(gift_id: int, owner_id: int, note: str = "") -> int:
+async def create_trade_listing(gift_ids: list, owner_id: int, note: str = "") -> int:
     pool = await get_pool()
-    return await pool.fetchval(
-        """INSERT INTO trade_listings (gift_id, owner_id, note)
-           VALUES ($1,$2,$3) RETURNING trade_id""",
-        gift_id, owner_id, note,
-    )
+    async with pool.acquire() as con:
+        async with con.transaction():
+            trade_id = await con.fetchval(
+                "INSERT INTO trade_listings (owner_id, note) VALUES ($1,$2) RETURNING trade_id",
+                owner_id, note,
+            )
+            await con.executemany(
+                "INSERT INTO trade_listing_gifts (trade_id, gift_id) VALUES ($1,$2)",
+                [(trade_id, gid) for gid in gift_ids],
+            )
+    return trade_id
 
 
 async def get_active_trade_listings(limit: int = 20, offset: int = 0) -> list:
     pool = await get_pool()
     rows = await pool.fetch(
-        f"""SELECT {TRADE_LISTING_FIELDS}
-            FROM trade_listings t
-            JOIN gifts g ON t.gift_id = g.gift_id
-            JOIN users u ON t.owner_id = u.user_id
-            WHERE t.status='active'
-            ORDER BY t.created_at DESC LIMIT $1 OFFSET $2""",
+        _TRADE_LISTING_SELECT + "WHERE t.status='active' ORDER BY t.created_at DESC LIMIT $1 OFFSET $2",
         limit, offset,
     )
-    return [dict(r) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["gifts"] = _parse_json_list(d["gifts"])
+        result.append(d)
+    return result
 
 
 async def get_trade_listing(trade_id: int) -> Optional[dict]:
     pool = await get_pool()
-    row = await pool.fetchrow(
-        f"""SELECT {TRADE_LISTING_FIELDS}
-            FROM trade_listings t
-            JOIN gifts g ON t.gift_id = g.gift_id
-            JOIN users u ON t.owner_id = u.user_id
-            WHERE t.trade_id=$1""",
-        trade_id,
-    )
-    return dict(row) if row else None
+    row = await pool.fetchrow(_TRADE_LISTING_SELECT + "WHERE t.trade_id=$1", trade_id)
+    if not row:
+        return None
+    d = dict(row)
+    d["gifts"] = _parse_json_list(d["gifts"])
+    return d
 
 
 async def get_active_trade_listing_for_gift(gift_id: int) -> Optional[dict]:
     pool = await get_pool()
     row = await pool.fetchrow(
-        "SELECT * FROM trade_listings WHERE gift_id=$1 AND status='active'", gift_id
+        """SELECT t.* FROM trade_listings t
+           JOIN trade_listing_gifts tlg ON tlg.trade_id = t.trade_id
+           WHERE tlg.gift_id=$1 AND t.status='active' LIMIT 1""",
+        gift_id,
     )
     return dict(row) if row else None
 
@@ -615,19 +666,26 @@ async def cancel_trade_listing(trade_id: int):
 
 
 async def create_trade_offer(trade_id: int, from_user_id: int,
-                              offered_gift_id: int, top_up_ton: float = 0.0) -> int:
+                              gift_ids: list, top_up_ton: float = 0.0) -> int:
     pool = await get_pool()
-    return await pool.fetchval(
-        """INSERT INTO trade_offers (trade_id, from_user_id, offered_gift_id, top_up_ton)
-           VALUES ($1,$2,$3,$4) RETURNING offer_id""",
-        trade_id, from_user_id, offered_gift_id, top_up_ton,
-    )
+    async with pool.acquire() as con:
+        async with con.transaction():
+            offer_id = await con.fetchval(
+                """INSERT INTO trade_offers (trade_id, from_user_id, top_up_ton)
+                   VALUES ($1,$2,$3) RETURNING offer_id""",
+                trade_id, from_user_id, top_up_ton,
+            )
+            await con.executemany(
+                "INSERT INTO trade_offer_gifts (offer_id, gift_id) VALUES ($1,$2)",
+                [(offer_id, gid) for gid in gift_ids],
+            )
+    return offer_id
 
 
 async def get_trade_offer(offer_id: int) -> Optional[dict]:
     pool = await get_pool()
     row = await pool.fetchrow(
-        """SELECT o.*, t.gift_id as target_gift_id, t.owner_id as to_user_id, t.status as trade_status
+        """SELECT o.*, t.owner_id as to_user_id, t.status as trade_status
            FROM trade_offers o
            JOIN trade_listings t ON o.trade_id = t.trade_id
            WHERE o.offer_id=$1""",
@@ -636,45 +694,48 @@ async def get_trade_offer(offer_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+_TRADE_OFFER_GIFTS_SUBQ = f"""
+    (SELECT json_agg({_GIFT_JSON} ORDER BY g.gift_id)
+     FROM trade_listing_gifts tlg JOIN gifts g ON g.gift_id=tlg.gift_id
+     WHERE tlg.trade_id=t.trade_id) as target_gifts,
+    (SELECT json_agg({_GIFT_JSON} ORDER BY g.gift_id)
+     FROM trade_offer_gifts tog JOIN gifts g ON g.gift_id=tog.gift_id
+     WHERE tog.offer_id=o.offer_id) as offered_gifts
+"""
+
+
 async def get_user_trade_offers(user_id: int) -> dict:
     """Входящие (на мои лоты) и исходящие (мои предложения) офферы пользователя."""
     pool = await get_pool()
     incoming = await pool.fetch(
-        """SELECT o.*, t.gift_id as target_gift_id, t.owner_id as to_user_id,
-                  tg.gift_name as target_gift_name, tg.gift_number as target_gift_number,
-                  tg.nft_address as target_nft_address,
-                  og.gift_name as offered_gift_name, og.gift_number as offered_gift_number,
-                  og.nft_address as offered_nft_address,
-                  u.username as from_username
+        f"""SELECT o.*, t.owner_id as to_user_id, u.username as from_username,
+                   {_TRADE_OFFER_GIFTS_SUBQ}
            FROM trade_offers o
            JOIN trade_listings t ON o.trade_id = t.trade_id
-           JOIN gifts tg ON t.gift_id = tg.gift_id
-           JOIN gifts og ON o.offered_gift_id = og.gift_id
            JOIN users u ON o.from_user_id = u.user_id
            WHERE t.owner_id=$1 AND o.status='pending'
            ORDER BY o.created_at DESC""",
         user_id,
     )
     outgoing = await pool.fetch(
-        """SELECT o.*, t.gift_id as target_gift_id, t.owner_id as to_user_id,
-                  tg.gift_name as target_gift_name, tg.gift_number as target_gift_number,
-                  tg.nft_address as target_nft_address,
-                  og.gift_name as offered_gift_name, og.gift_number as offered_gift_number,
-                  og.nft_address as offered_nft_address,
-                  u.username as to_username
+        f"""SELECT o.*, t.owner_id as to_user_id, u.username as to_username,
+                   {_TRADE_OFFER_GIFTS_SUBQ}
            FROM trade_offers o
            JOIN trade_listings t ON o.trade_id = t.trade_id
-           JOIN gifts tg ON t.gift_id = tg.gift_id
-           JOIN gifts og ON o.offered_gift_id = og.gift_id
            JOIN users u ON t.owner_id = u.user_id
            WHERE o.from_user_id=$1 AND o.status='pending'
            ORDER BY o.created_at DESC""",
         user_id,
     )
-    return {
-        "incoming": [dict(r) for r in incoming],
-        "outgoing": [dict(r) for r in outgoing],
-    }
+    def _fmt(rows):
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["target_gifts"] = _parse_json_list(d["target_gifts"])
+            d["offered_gifts"] = _parse_json_list(d["offered_gifts"])
+            out.append(d)
+        return out
+    return {"incoming": _fmt(incoming), "outgoing": _fmt(outgoing)}
 
 
 async def decline_trade_offer(offer_id: int):
@@ -698,16 +759,15 @@ async def cancel_trade_offer(offer_id: int, from_user_id: int) -> bool:
 
 
 async def accept_trade_offer(offer_id: int) -> str:
-    """Атомарно меняет владельцев обоих подарков + доплату. Возвращает ''
-    при успехе, иначе человеко-читаемую причину отказа (гифт уже не тот
-    и т.п. — гонка условий), ничего не откатывая руками, т.к. транзакция сама
-    RAISEуется и отменяется."""
+    """Атомарно меняет владельцев ВСЕХ подарков с обеих сторон + доплату.
+    Возвращает '' при успехе, иначе человеко-читаемую причину отказа (гифт
+    уже не тот и т.п. — гонка условий), ничего не откатывая руками, т.к.
+    транзакция сама RAISEуется и отменяется."""
     pool = await get_pool()
     async with pool.acquire() as con:
         async with con.transaction():
             offer = await con.fetchrow(
-                """SELECT o.*, t.gift_id as target_gift_id, t.owner_id as to_user_id,
-                          t.status as trade_status
+                """SELECT o.*, t.owner_id as to_user_id, t.status as trade_status
                    FROM trade_offers o
                    JOIN trade_listings t ON o.trade_id = t.trade_id
                    WHERE o.offer_id=$1 FOR UPDATE""",
@@ -718,15 +778,26 @@ async def accept_trade_offer(offer_id: int) -> str:
             if offer["trade_status"] != "active":
                 return "Лот на обмен уже закрыт"
 
-            target_gift = await con.fetchrow(
-                "SELECT owner_id FROM gifts WHERE gift_id=$1 FOR UPDATE", offer["target_gift_id"]
+            target_gift_ids = [r["gift_id"] for r in await con.fetch(
+                "SELECT gift_id FROM trade_listing_gifts WHERE trade_id=$1", offer["trade_id"])]
+            offered_gift_ids = [r["gift_id"] for r in await con.fetch(
+                "SELECT gift_id FROM trade_offer_gifts WHERE offer_id=$1", offer_id)]
+            if not target_gift_ids or not offered_gift_ids:
+                return "Лот пуст — обмен невозможен"
+
+            target_rows = await con.fetch(
+                "SELECT gift_id, owner_id FROM gifts WHERE gift_id = ANY($1::bigint[]) FOR UPDATE",
+                target_gift_ids,
             )
-            offered_gift = await con.fetchrow(
-                "SELECT owner_id FROM gifts WHERE gift_id=$1 FOR UPDATE", offer["offered_gift_id"]
+            offered_rows = await con.fetch(
+                "SELECT gift_id, owner_id FROM gifts WHERE gift_id = ANY($1::bigint[]) FOR UPDATE",
+                offered_gift_ids,
             )
-            if not target_gift or target_gift["owner_id"] != offer["to_user_id"]:
+            if len(target_rows) != len(target_gift_ids) or any(
+                    r["owner_id"] != offer["to_user_id"] for r in target_rows):
                 return "Ваш подарок больше не у вас"
-            if not offered_gift or offered_gift["owner_id"] != offer["from_user_id"]:
+            if len(offered_rows) != len(offered_gift_ids) or any(
+                    r["owner_id"] != offer["from_user_id"] for r in offered_rows):
                 return "Предложенный подарок больше не у отправителя"
 
             if offer["top_up_ton"] > 0:
@@ -743,20 +814,20 @@ async def accept_trade_offer(offer_id: int) -> str:
                 )
 
             await con.execute(
-                "UPDATE gifts SET owner_id=$1, acquired_at=NOW() WHERE gift_id=$2",
-                offer["to_user_id"], offer["offered_gift_id"],
+                "UPDATE gifts SET owner_id=$1, acquired_at=NOW() WHERE gift_id = ANY($2::bigint[])",
+                offer["to_user_id"], offered_gift_ids,
             )
             await con.execute(
-                "UPDATE gifts SET owner_id=$1, acquired_at=NOW() WHERE gift_id=$2",
-                offer["from_user_id"], offer["target_gift_id"],
+                "UPDATE gifts SET owner_id=$1, acquired_at=NOW() WHERE gift_id = ANY($2::bigint[])",
+                offer["from_user_id"], target_gift_ids,
             )
             # Пока оффер висел pending, отправитель мог параллельно выставить
             # предложенный подарок на продажу/аукцион на СВОЁМ прежнем владении —
             # такой лот не блокировался (лочится только сам предмет обмена, а не
             # то, что человек ЕЩЁ МОЖЕТ предложить). После смены владельца любой
             # такой лот стал бы висеть под старым продавцом на чужом подарке —
-            # закрываем оба на всякий случай.
-            swapped_gift_ids = [offer["target_gift_id"], offer["offered_gift_id"]]
+            # закрываем все такие на всякий случай.
+            swapped_gift_ids = target_gift_ids + offered_gift_ids
             await con.execute(
                 "UPDATE listings SET status='cancelled' WHERE gift_id = ANY($1::bigint[]) AND status='active'",
                 swapped_gift_ids,
@@ -826,24 +897,25 @@ async def get_user_completed_trades(user_id: int, limit: int = 10) -> list:
     """Завершённые обмены (принятые офферы), где пользователь — любая из сторон."""
     pool = await get_pool()
     rows = await pool.fetch(
-        """SELECT o.offer_id, o.resolved_at as completed_at, o.top_up_ton,
-                  o.from_user_id, t.owner_id as to_user_id,
-                  tg.gift_name as target_gift_name, tg.gift_number as target_gift_number,
-                  tg.nft_address as target_nft_address,
-                  og.gift_name as offered_gift_name, og.gift_number as offered_gift_number,
-                  og.nft_address as offered_nft_address,
-                  ufrom.username as from_username, uto.username as to_username
+        f"""SELECT o.offer_id, o.resolved_at as completed_at, o.top_up_ton,
+                   o.from_user_id, t.owner_id as to_user_id,
+                   ufrom.username as from_username, uto.username as to_username,
+                   {_TRADE_OFFER_GIFTS_SUBQ}
            FROM trade_offers o
            JOIN trade_listings t ON o.trade_id = t.trade_id
-           JOIN gifts tg ON t.gift_id = tg.gift_id
-           JOIN gifts og ON o.offered_gift_id = og.gift_id
            JOIN users ufrom ON o.from_user_id = ufrom.user_id
            JOIN users uto ON t.owner_id = uto.user_id
            WHERE o.status='accepted' AND (o.from_user_id=$1 OR t.owner_id=$1)
            ORDER BY o.resolved_at DESC LIMIT $2""",
         user_id, limit,
     )
-    return [dict(r) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["target_gifts"] = _parse_json_list(d["target_gifts"])
+        d["offered_gifts"] = _parse_json_list(d["offered_gifts"])
+        result.append(d)
+    return result
 
 
 # ── Офферы по цене на лоты Маркета ───────────────────────────────────────────
@@ -1174,18 +1246,20 @@ async def set_gift_owner(gift_id: int, owner_id: Optional[int]):
 
 
 async def gift_is_locked(gift_id: int) -> bool:
-    """Гифт занят активным лотом, аукционом, обменом или уже приложен к
-    ожидающему предложению обмена — выводить/перевыставлять нельзя."""
+    """Гифт занят активным лотом, аукционом, обменом (в т.ч. как один из
+    нескольких подарков лота/оффера) — выводить/перевыставлять нельзя."""
     pool = await get_pool()
     return await pool.fetchval(
         """SELECT EXISTS(SELECT 1 FROM listings
                          WHERE gift_id=$1 AND status='active')
                OR EXISTS(SELECT 1 FROM auctions
                          WHERE gift_id=$1 AND status='active')
-               OR EXISTS(SELECT 1 FROM trade_listings
-                         WHERE gift_id=$1 AND status='active')
-               OR EXISTS(SELECT 1 FROM trade_offers
-                         WHERE offered_gift_id=$1 AND status='pending')""",
+               OR EXISTS(SELECT 1 FROM trade_listing_gifts tlg
+                         JOIN trade_listings t ON tlg.trade_id=t.trade_id
+                         WHERE tlg.gift_id=$1 AND t.status='active')
+               OR EXISTS(SELECT 1 FROM trade_offer_gifts tog
+                         JOIN trade_offers o ON tog.offer_id=o.offer_id
+                         WHERE tog.gift_id=$1 AND o.status='pending')""",
         gift_id,
     )
 

@@ -9,7 +9,7 @@ import ton_client
 import deposits
 import logging
 import urllib.request
-from typing import Optional
+from typing import Optional, List
 from urllib.parse import parse_qsl
 
 from contextlib import asynccontextmanager
@@ -583,8 +583,16 @@ async def trade_detail(trade_id: int):
 
 
 class CreateTradeBody(BaseModel):
-    gift_id: int
+    gift_ids: List[int]
     note: str = ""
+
+
+def _gift_list_summary(gifts: list) -> str:
+    """'Tama Gadget #123, Vice Cream #456' — для уведомлений."""
+    return ", ".join(
+        f"{g['gift_name']}{' #' + g['gift_number'] if g.get('gift_number') else ''}"
+        for g in gifts
+    )
 
 
 @app.post("/api/trades")
@@ -595,12 +603,16 @@ async def create_trade_endpoint(
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
         raise HTTPException(401, "Unauthorized")
-    gift = await get_gift(body.gift_id)
-    if not gift or gift["owner_id"] != user["id"]:
-        raise HTTPException(404, "Gift not found or not yours")
-    if await gift_is_locked(body.gift_id):
-        raise HTTPException(409, "Этот подарок уже занят (продажа/аукцион/обмен)")
-    trade_id = await create_trade_listing(body.gift_id, user["id"], body.note)
+    gift_ids = list(dict.fromkeys(body.gift_ids))  # без дублей, порядок сохраняем
+    if not gift_ids:
+        raise HTTPException(400, "Выберите хотя бы один подарок")
+    for gift_id in gift_ids:
+        gift = await get_gift(gift_id)
+        if not gift or gift["owner_id"] != user["id"]:
+            raise HTTPException(404, "Gift not found or not yours")
+        if await gift_is_locked(gift_id):
+            raise HTTPException(409, "Этот подарок уже занят (продажа/аукцион/обмен)")
+    trade_id = await create_trade_listing(gift_ids, user["id"], body.note)
     return {"ok": True, "trade_id": trade_id}
 
 
@@ -620,7 +632,7 @@ async def cancel_trade_endpoint(
 
 
 class TradeOfferBody(BaseModel):
-    offered_gift_id: int
+    offered_gift_ids: List[int]
     top_up_ton: float = 0.0
 
 
@@ -642,21 +654,27 @@ async def create_trade_offer_endpoint(
     if trade["owner_id"] == user["id"]:
         raise HTTPException(400, "Cannot offer on your own trade listing")
 
-    gift = await get_gift(body.offered_gift_id)
-    if not gift or gift["owner_id"] != user["id"]:
-        raise HTTPException(404, "Offered gift not found or not yours")
-    if await gift_is_locked(body.offered_gift_id):
-        raise HTTPException(409, "Этот подарок уже занят (продажа/аукцион/обмен)")
+    gift_ids = list(dict.fromkeys(body.offered_gift_ids))
+    if not gift_ids:
+        raise HTTPException(400, "Выберите хотя бы один подарок")
+    offered_gifts = []
+    for gift_id in gift_ids:
+        gift = await get_gift(gift_id)
+        if not gift or gift["owner_id"] != user["id"]:
+            raise HTTPException(404, "Offered gift not found or not yours")
+        if await gift_is_locked(gift_id):
+            raise HTTPException(409, "Этот подарок уже занят (продажа/аукцион/обмен)")
+        offered_gifts.append(gift)
 
-    offer_id = await create_trade_offer(trade_id, user["id"], body.offered_gift_id, body.top_up_ton)
+    offer_id = await create_trade_offer(trade_id, user["id"], gift_ids, body.top_up_ton)
 
     full_name = " ".join(p for p in [user.get("first_name"), user.get("last_name")] if p)
     from_name = user.get("username") or full_name or "пользователь"
     await notify_seller(
         trade["owner_id"],
         f"🔄 <b>Вам предложили обмен!</b>\n\n"
-        f"🎁 За: {trade['gift_name']} #{trade.get('gift_number','?')}\n"
-        f"🎁 Предлагают: {gift['gift_name']} #{gift.get('gift_number','?')}"
+        f"🎁 За: {_gift_list_summary(trade['gifts'])}\n"
+        f"🎁 Предлагают: {_gift_list_summary(offered_gifts)}"
         + (f"\n💎 + доплата {body.top_up_ton:.2f} GRAM" if body.top_up_ton > 0 else "")
         + f"\n👤 От: @{from_name}\n\nСмотри в Профиле → Офферы."
     )

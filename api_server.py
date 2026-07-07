@@ -349,7 +349,7 @@ async def buy_listing(
         ref_bonus = price * REFERRAL_BONUS_PERCENT
 
     # Демо-режим: списываем с внутреннего баланса. В проде — реальный TON-платёж.
-    if buyer["balance_ton"] < price:
+    if buyer["balance_ton"] < price - 1e-6:
         raise HTTPException(
             400, f"Insufficient balance: {buyer['balance_ton']:.4f} TON, need {price:.4f}"
         )
@@ -649,9 +649,15 @@ async def create_trade_offer_endpoint(
         raise HTTPException(400, "top_up_ton must be >= 0")
     if body.top_up_ton > 0:
         db_user = await get_user(user["id"])
-        if not db_user or db_user["balance_ton"] < body.top_up_ton:
+        balance = db_user["balance_ton"] if db_user else 0.0
+        # Небольшой допуск на погрешность float — иначе баланс, который на экране
+        # округлён до "0.58", но хранится как 0.5799999999999998, ложно считался
+        # бы недостаточным для доплаты ровно в 0.58.
+        if balance < body.top_up_ton - 1e-6:
             raise HTTPException(
-                400, f"Недостаточно баланса для доплаты: нужно {body.top_up_ton:.2f} GRAM"
+                400,
+                f"Недостаточно баланса для доплаты: на балансе {balance:.2f}, "
+                f"нужно {body.top_up_ton:.2f} GRAM"
             )
 
     trade = await get_trade_listing(trade_id)

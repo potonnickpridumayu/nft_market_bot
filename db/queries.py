@@ -284,9 +284,11 @@ async def get_user(user_id: int) -> Optional[dict]:
 async def try_charge_balance(user_id: int, amount: float) -> bool:
     """Атомарно списать amount, только если хватает баланса. True = списано."""
     pool = await get_pool()
+    # Допуск на погрешность float — балансу, равному сумме списания с точностью
+    # до отображаемых знаков, не должно ложно не хватать из-за 0.5799999999998.
     row = await pool.fetchrow(
         """UPDATE users SET balance_ton = balance_ton - $1
-           WHERE user_id = $2 AND balance_ton >= $1
+           WHERE user_id = $2 AND balance_ton >= $1 - 0.000001
            RETURNING user_id""",
         amount, user_id,
     )
@@ -803,7 +805,8 @@ async def accept_trade_offer(offer_id: int) -> str:
             if offer["top_up_ton"] > 0:
                 charged = await con.fetchrow(
                     """UPDATE users SET balance_ton = balance_ton - $1
-                       WHERE user_id=$2 AND balance_ton >= $1 RETURNING user_id""",
+                       WHERE user_id=$2 AND balance_ton >= $1 - 0.000001
+                       RETURNING user_id""",
                     offer["top_up_ton"], offer["from_user_id"],
                 )
                 if not charged:
@@ -1019,7 +1022,8 @@ async def accept_listing_offer(offer_id: int, market_fee: float, referral_bonus_
 
             charged = await con.fetchrow(
                 """UPDATE users SET balance_ton = balance_ton - $1
-                   WHERE user_id=$2 AND balance_ton >= $1 RETURNING user_id""",
+                   WHERE user_id=$2 AND balance_ton >= $1 - 0.000001
+                   RETURNING user_id""",
                 price, buyer_id,
             )
             if not charged:
@@ -1280,7 +1284,7 @@ async def create_withdrawal(user_id: int, to_address: str, amount_ton: float) ->
         async with con.transaction():
             bal = await con.fetchval(
                 "SELECT balance_ton FROM users WHERE user_id=$1 FOR UPDATE", user_id)
-            if bal is None or float(bal) < amount_ton:
+            if bal is None or float(bal) < amount_ton - 1e-6:
                 return 0
             await con.execute(
                 "UPDATE users SET balance_ton = balance_ton - $1 WHERE user_id=$2",

@@ -31,6 +31,8 @@ from db.queries import (
     create_withdrawal, mark_withdrawal_sent,
     # гард от дублей лотов:
     get_active_listing_for_gift, get_referral_stats,
+    # отмена зависшего лота (админ):
+    cancel_listing,
     # смена цены лота:
     set_listing_price,
     # админ-ручки:
@@ -1000,6 +1002,18 @@ async def admin_reassign_gift(
                 gift_id, body.user_id, gift.get("owner_id"))
     return {"ok": True, "gift_id": gift_id,
             "old_owner": gift.get("owner_id"), "new_owner": body.user_id}
+
+
+@app.post("/api/admin/listings/{listing_id}/cancel")
+async def admin_cancel_listing(
+        listing_id: int,
+        x_admin_token: Optional[str] = Header(None),
+):
+    """Ручная отмена зависшего лота (напр. созданного на подарок, который потом
+    ушёл владельцу через Обмен, оставив дублирующийся активный листинг)."""
+    _check_admin(x_admin_token)
+    await cancel_listing(listing_id)
+    return {"ok": True}
 
 if __name__ == "__main__":
     import uvicorn

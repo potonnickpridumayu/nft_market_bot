@@ -736,6 +736,21 @@ async def accept_trade_offer(offer_id: int) -> str:
                 "UPDATE gifts SET owner_id=$1, acquired_at=NOW() WHERE gift_id=$2",
                 offer["from_user_id"], offer["target_gift_id"],
             )
+            # Пока оффер висел pending, отправитель мог параллельно выставить
+            # предложенный подарок на продажу/аукцион на СВОЁМ прежнем владении —
+            # такой лот не блокировался (лочится только сам предмет обмена, а не
+            # то, что человек ЕЩЁ МОЖЕТ предложить). После смены владельца любой
+            # такой лот стал бы висеть под старым продавцом на чужом подарке —
+            # закрываем оба на всякий случай.
+            swapped_gift_ids = [offer["target_gift_id"], offer["offered_gift_id"]]
+            await con.execute(
+                "UPDATE listings SET status='cancelled' WHERE gift_id = ANY($1::bigint[]) AND status='active'",
+                swapped_gift_ids,
+            )
+            await con.execute(
+                "UPDATE auctions SET status='ended' WHERE gift_id = ANY($1::bigint[]) AND status='active'",
+                swapped_gift_ids,
+            )
             await con.execute(
                 "UPDATE trade_listings SET status='completed' WHERE trade_id=$1", offer["trade_id"]
             )

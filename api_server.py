@@ -44,6 +44,9 @@ from db.queries import (
     get_active_trade_listing_for_gift, cancel_trade_listing,
     create_trade_offer, get_trade_offer, get_user_trade_offers,
     decline_trade_offer, cancel_trade_offer, accept_trade_offer,
+    # офферы по цене на лоты маркета:
+    create_listing_offer, get_listing_offer, get_user_listing_offers,
+    decline_listing_offer, cancel_listing_offer, accept_listing_offer,
 )
 
 # Комиссия (GRAM) за вывод нативного TG-подарка — окупает 25 Stars трансфера
@@ -411,6 +414,117 @@ async def buy_listing(
     }
 
 
+# ===== ОФФЕРЫ ПО ЦЕНЕ (ЛОТЫ МАРКЕТА) =====
+
+MIN_OFFER_FRACTION = 0.5  # оффер не может быть меньше 50% цены лота
+
+
+class ListingOfferBody(BaseModel):
+    amount_ton: float
+
+
+@app.post("/api/listings/{listing_id}/offer")
+async def create_listing_offer_endpoint(
+    listing_id: int,
+    body: ListingOfferBody,
+    x_telegram_init_data: Optional[str] = Header(None),
+):
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Unauthorized")
+
+    lst = await get_listing(listing_id)
+    if not lst or lst["status"] != "active":
+        raise HTTPException(404, "Listing not found")
+    if lst["seller_id"] == user["id"]:
+        raise HTTPException(400, "Cannot offer on your own listing")
+
+    min_amount = lst["price_ton"] * MIN_OFFER_FRACTION
+    if body.amount_ton < min_amount:
+        raise HTTPException(400, f"Оффер не может быть меньше {min_amount:.2f} GRAM (50% цены)")
+
+    full_name = " ".join(p for p in [user.get("first_name"), user.get("last_name")] if p)
+    await get_or_create_user(user["id"], user.get("username", ""), full_name)
+
+    offer_id = await create_listing_offer(listing_id, user["id"], body.amount_ton)
+
+    from_name = user.get("username") or full_name or "пользователь"
+    await notify_seller(
+        lst["seller_id"],
+        f"💬 <b>Вам предложили цену!</b>\n\n"
+        f"🎁 {lst['gift_name']} #{lst.get('gift_number','?')}\n"
+        f"🏷 Цена лота: {lst['price_ton']:.2f} GRAM\n"
+        f"💰 Предложено: {body.amount_ton:.2f} GRAM\n"
+        f"👤 От: @{from_name}\n\nСмотри в Профиле → Офферы."
+    )
+    return {"ok": True, "offer_id": offer_id}
+
+
+@app.get("/api/listings/offers/mine")
+async def my_listing_offers(x_telegram_init_data: Optional[str] = Header(None)):
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Unauthorized")
+    return await get_user_listing_offers(user["id"])
+
+
+@app.post("/api/listings/offers/{offer_id}/accept")
+async def accept_listing_offer_endpoint(
+    offer_id: int,
+    x_telegram_init_data: Optional[str] = Header(None),
+):
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Unauthorized")
+    offer = await get_listing_offer(offer_id)
+    if not offer or offer["seller_id"] != user["id"]:
+        raise HTTPException(404, "Offer not found")
+    if offer["status"] != "pending":
+        raise HTTPException(409, "Offer is no longer pending")
+
+    error, result = await accept_listing_offer(offer_id, MARKET_FEE, REFERRAL_BONUS_PERCENT)
+    if error:
+        raise HTTPException(409, error)
+
+    gift = await get_gift(result["gift_id"])
+    await notify_seller(
+        result["buyer_id"],
+        f"🎉 <b>Ваше предложение цены принято!</b>\n\n"
+        f"🎁 {gift['gift_name']} #{gift.get('gift_number','?')}\n"
+        f"💰 Списано: {result['price']:.4f} GRAM\n\nСмотри в Портфеле."
+    )
+    return {"ok": True}
+
+
+@app.post("/api/listings/offers/{offer_id}/decline")
+async def decline_listing_offer_endpoint(
+    offer_id: int,
+    x_telegram_init_data: Optional[str] = Header(None),
+):
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Unauthorized")
+    offer = await get_listing_offer(offer_id)
+    if not offer or offer["seller_id"] != user["id"]:
+        raise HTTPException(404, "Offer not found")
+    await decline_listing_offer(offer_id)
+    return {"ok": True}
+
+
+@app.post("/api/listings/offers/{offer_id}/cancel")
+async def cancel_listing_offer_endpoint(
+    offer_id: int,
+    x_telegram_init_data: Optional[str] = Header(None),
+):
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Unauthorized")
+    ok = await cancel_listing_offer(offer_id, user["id"])
+    if not ok:
+        raise HTTPException(404, "Offer not found or not yours")
+    return {"ok": True}
+
+
 # ===== AUCTIONS =====
 
 @app.get("/api/auctions")
@@ -634,8 +748,10 @@ async def profile(x_telegram_init_data: Optional[str] = Header(None)):
         raise HTTPException(401, "Unauthorized")
     db_user = await get_user(user["id"])
     txs = await get_user_transactions(user["id"], limit=10)
-    offers = await get_user_trade_offers(user["id"])
-    return {"user": db_user, "transactions": txs, "pending_offers": len(offers["incoming"])}
+    trade_offers = await get_user_trade_offers(user["id"])
+    listing_offers = await get_user_listing_offers(user["id"])
+    pending = len(trade_offers["incoming"]) + len(listing_offers["incoming"])
+    return {"user": db_user, "transactions": txs, "pending_offers": pending}
 
 
 # ===== STATS =====

@@ -193,6 +193,20 @@ CREATE TABLE IF NOT EXISTS trade_offers (
 CREATE INDEX IF NOT EXISTS idx_trade_listings_status ON trade_listings(status);
 CREATE INDEX IF NOT EXISTS idx_trade_offers_trade     ON trade_offers(trade_id);
 CREATE INDEX IF NOT EXISTS idx_trade_offers_from      ON trade_offers(from_user_id);
+
+-- Офферы по цене на обычные лоты Маркета: покупатель предлагает свою цену
+-- (не ниже 50% цены лота, см. api_server.py), продавец принимает/отклоняет.
+CREATE TABLE IF NOT EXISTS listing_offers (
+    offer_id     BIGSERIAL PRIMARY KEY,
+    listing_id   BIGINT REFERENCES listings(listing_id),
+    from_user_id BIGINT REFERENCES users(user_id),
+    amount_ton   DOUBLE PRECISION NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending', -- pending/accepted/declined/cancelled
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_listing_offers_listing ON listing_offers(listing_id);
+CREATE INDEX IF NOT EXISTS idx_listing_offers_from    ON listing_offers(from_user_id);
 """
 
 
@@ -806,6 +820,163 @@ async def get_user_transactions(user_id: int, limit: int = 10) -> list:
         user_id, limit,
     )
     return [dict(r) for r in rows]
+
+
+# ── Офферы по цене на лоты Маркета ───────────────────────────────────────────
+
+async def create_listing_offer(listing_id: int, from_user_id: int, amount_ton: float) -> int:
+    pool = await get_pool()
+    return await pool.fetchval(
+        """INSERT INTO listing_offers (listing_id, from_user_id, amount_ton)
+           VALUES ($1,$2,$3) RETURNING offer_id""",
+        listing_id, from_user_id, amount_ton,
+    )
+
+
+async def get_listing_offer(offer_id: int) -> Optional[dict]:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """SELECT o.*, l.seller_id, l.gift_id, l.price_ton, l.status as listing_status
+           FROM listing_offers o JOIN listings l ON o.listing_id = l.listing_id
+           WHERE o.offer_id=$1""",
+        offer_id,
+    )
+    return dict(row) if row else None
+
+
+async def get_user_listing_offers(user_id: int) -> dict:
+    """Входящие (на мои лоты) и исходящие (мои предложения цены) офферы."""
+    pool = await get_pool()
+    incoming = await pool.fetch(
+        """SELECT o.*, l.price_ton, g.gift_name, g.gift_number, g.nft_address,
+                  u.username as from_username
+           FROM listing_offers o
+           JOIN listings l ON o.listing_id = l.listing_id
+           JOIN gifts g ON l.gift_id = g.gift_id
+           JOIN users u ON o.from_user_id = u.user_id
+           WHERE l.seller_id=$1 AND o.status='pending'
+           ORDER BY o.created_at DESC""",
+        user_id,
+    )
+    outgoing = await pool.fetch(
+        """SELECT o.*, l.price_ton, g.gift_name, g.gift_number, g.nft_address,
+                  u.username as to_username
+           FROM listing_offers o
+           JOIN listings l ON o.listing_id = l.listing_id
+           JOIN gifts g ON l.gift_id = g.gift_id
+           JOIN users u ON l.seller_id = u.user_id
+           WHERE o.from_user_id=$1 AND o.status='pending'
+           ORDER BY o.created_at DESC""",
+        user_id,
+    )
+    return {"incoming": [dict(r) for r in incoming], "outgoing": [dict(r) for r in outgoing]}
+
+
+async def decline_listing_offer(offer_id: int):
+    pool = await get_pool()
+    await pool.execute(
+        """UPDATE listing_offers SET status='declined', resolved_at=NOW()
+           WHERE offer_id=$1 AND status='pending'""",
+        offer_id,
+    )
+
+
+async def cancel_listing_offer(offer_id: int, from_user_id: int) -> bool:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """UPDATE listing_offers SET status='cancelled', resolved_at=NOW()
+           WHERE offer_id=$1 AND from_user_id=$2 AND status='pending'
+           RETURNING offer_id""",
+        offer_id, from_user_id,
+    )
+    return row is not None
+
+
+async def accept_listing_offer(offer_id: int, market_fee: float, referral_bonus_percent: float):
+    """Атомарно продаёт лот покупателю по цене оффера (а не цене лота).
+    Возвращает (error, result): error='' и result-дикт при успехе."""
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        async with con.transaction():
+            offer = await con.fetchrow(
+                """SELECT o.*, l.seller_id, l.gift_id, l.status as listing_status
+                   FROM listing_offers o JOIN listings l ON o.listing_id = l.listing_id
+                   WHERE o.offer_id=$1 FOR UPDATE""",
+                offer_id,
+            )
+            if not offer or offer["status"] != "pending":
+                return "Предложение уже неактуально", None
+            if offer["listing_status"] != "active":
+                return "Лот уже неактивен", None
+
+            price = offer["amount_ton"]
+            buyer_id = offer["from_user_id"]
+            seller_id = offer["seller_id"]
+
+            seller = await con.fetchrow(
+                "SELECT referred_by FROM users WHERE user_id=$1 FOR UPDATE", seller_id
+            )
+            fee = price * market_fee
+            ref_bonus = 0.0
+            if seller and seller["referred_by"] and seller["referred_by"] != buyer_id:
+                ref_bonus = price * referral_bonus_percent
+
+            charged = await con.fetchrow(
+                """UPDATE users SET balance_ton = balance_ton - $1
+                   WHERE user_id=$2 AND balance_ton >= $1 RETURNING user_id""",
+                price, buyer_id,
+            )
+            if not charged:
+                return "У покупателя не хватает баланса", None
+
+            seller_net = price - fee - ref_bonus
+            await con.execute(
+                "UPDATE users SET balance_ton = balance_ton + $1 WHERE user_id=$2",
+                seller_net, seller_id,
+            )
+            await con.execute(
+                "UPDATE gifts SET owner_id=$1, acquired_at=NOW() WHERE gift_id=$2",
+                buyer_id, offer["gift_id"],
+            )
+            await con.execute(
+                "UPDATE listings SET status='sold', sold_at=NOW() WHERE listing_id=$1",
+                offer["listing_id"],
+            )
+            tx_id = await con.fetchval(
+                """INSERT INTO transactions
+                   (buyer_id, seller_id, gift_id, amount_ton, fee_ton, ref_bonus_ton, source, source_id)
+                   VALUES ($1,$2,$3,$4,$5,$6,'listing_offer',$7) RETURNING tx_id""",
+                buyer_id, seller_id, offer["gift_id"], price, fee, ref_bonus, offer["listing_id"],
+            )
+            await con.execute(
+                "UPDATE users SET total_spent=total_spent+$1 WHERE user_id=$2", price, buyer_id
+            )
+            await con.execute(
+                "UPDATE users SET total_earned=total_earned+$1 WHERE user_id=$2", seller_net, seller_id
+            )
+            if ref_bonus > 0 and seller["referred_by"]:
+                await con.execute(
+                    "UPDATE users SET balance_ton = balance_ton + $1 WHERE user_id=$2",
+                    ref_bonus, seller["referred_by"],
+                )
+                await con.execute(
+                    """INSERT INTO referral_payouts (referrer_id, from_user_id, tx_id, amount_ton)
+                       VALUES ($1,$2,$3,$4)""",
+                    seller["referred_by"], seller_id, tx_id, ref_bonus,
+                )
+            await con.execute(
+                "UPDATE listing_offers SET status='accepted', resolved_at=NOW() WHERE offer_id=$1",
+                offer_id,
+            )
+            await con.execute(
+                """UPDATE listing_offers SET status='declined', resolved_at=NOW()
+                   WHERE listing_id=$1 AND offer_id!=$2 AND status='pending'""",
+                offer["listing_id"], offer_id,
+            )
+    return "", {
+        "buyer_id": buyer_id, "seller_id": seller_id, "gift_id": offer["gift_id"],
+        "price": price, "fee": fee, "seller_net": seller_net, "listing_id": offer["listing_id"],
+    }
 
 
 # ── Referrals ─────────────────────────────────────────────────────────────────

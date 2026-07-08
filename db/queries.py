@@ -935,6 +935,22 @@ async def get_user_completed_trades(user_id: int, limit: int = 10) -> list:
     return result
 
 
+async def get_user_deal_count(user_id: int) -> int:
+    """Полное число завершённых сделок (продажи/покупки + принятые обмены),
+    независимо от того, сколько из них реально подгружается в историю."""
+    pool = await get_pool()
+    tx_count = await pool.fetchval(
+        "SELECT COUNT(*) FROM transactions WHERE buyer_id=$1 OR seller_id=$1", user_id
+    )
+    trade_count = await pool.fetchval(
+        """SELECT COUNT(*) FROM trade_offers o
+           JOIN trade_listings t ON o.trade_id = t.trade_id
+           WHERE o.status='accepted' AND (o.from_user_id=$1 OR t.owner_id=$1)""",
+        user_id,
+    )
+    return tx_count + trade_count
+
+
 # ── Офферы по цене на лоты Маркета ───────────────────────────────────────────
 
 async def create_listing_offer(listing_id: int, from_user_id: int, amount_ton: float) -> int:

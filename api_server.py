@@ -770,7 +770,9 @@ async def portfolio(x_telegram_init_data: Optional[str] = Header(None)):
         g["on_sale"] = bool(active_listing)
         g["listing_id"] = active_listing["listing_id"] if active_listing else None
         g["price_ton"] = active_listing["price_ton"] if active_listing else None
-        g["on_trade"] = bool(await get_active_trade_listing_for_gift(g["gift_id"]))
+        active_trade = await get_active_trade_listing_for_gift(g["gift_id"])
+        g["on_trade"] = bool(active_trade)
+        g["trade_id"] = active_trade["trade_id"] if active_trade else None
         result.append(g)
     return {"gifts": result}
 

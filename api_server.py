@@ -715,7 +715,7 @@ async def accept_trade_offer_endpoint(
     if offer["status"] != "pending":
         raise HTTPException(409, "Offer is no longer pending")
 
-    error = await accept_trade_offer(offer_id)
+    error = await accept_trade_offer(offer_id, MARKET_FEE)
     if error:
         raise HTTPException(409, error)
 

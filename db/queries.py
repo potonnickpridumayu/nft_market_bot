@@ -162,6 +162,10 @@ ALTER TABLE gifts ADD COLUMN IF NOT EXISTS tg_owned_gift_id TEXT;
 ALTER TABLE gifts ADD COLUMN IF NOT EXISTS tg_sticker TEXT;   -- file_id анимации (tgs/webm)
 ALTER TABLE gifts ADD COLUMN IF NOT EXISTS tg_thumb TEXT;     -- file_id статичной превьюшки
 ALTER TABLE gifts ADD COLUMN IF NOT EXISTS tg_backdrop TEXT;  -- JSON: цвета фона + file_id узора
+-- Комиссия площадки, реально удержанная с доплаты обмена при принятии оффера
+-- (0, если доплаты не было). Хранится по факту, а не пересчитывается по
+-- текущему MARKET_FEE — чтобы старые обмены не "переоценивались" задним числом.
+ALTER TABLE trade_offers ADD COLUMN IF NOT EXISTS fee_ton DOUBLE PRECISION NOT NULL DEFAULT 0;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_gifts_tg_owned_gift_id
     ON gifts (tg_owned_gift_id) WHERE tg_owned_gift_id IS NOT NULL;
 
@@ -760,11 +764,13 @@ async def cancel_trade_offer(offer_id: int, from_user_id: int) -> bool:
     return row is not None
 
 
-async def accept_trade_offer(offer_id: int) -> str:
-    """Атомарно меняет владельцев ВСЕХ подарков с обеих сторон + доплату.
-    Возвращает '' при успехе, иначе человеко-читаемую причину отказа (гифт
-    уже не тот и т.п. — гонка условий), ничего не откатывая руками, т.к.
-    транзакция сама RAISEуется и отменяется."""
+async def accept_trade_offer(offer_id: int, market_fee: float = 0.0) -> str:
+    """Атомарно меняет владельцев ВСЕХ подарков с обеих сторон + доплату
+    (с комиссией площадки market_fee, удерживаемой с доплаты — сами подарки
+    в бартере комиссией не облагаются, у них нет цены). Возвращает '' при
+    успехе, иначе человеко-читаемую причину отказа (гифт уже не тот и т.п. —
+    гонка условий), ничего не откатывая руками, т.к. транзакция сама
+    RAISEуется и отменяется."""
     pool = await get_pool()
     async with pool.acquire() as con:
         async with con.transaction():
@@ -802,6 +808,7 @@ async def accept_trade_offer(offer_id: int) -> str:
                     r["owner_id"] != offer["from_user_id"] for r in offered_rows):
                 return "Предложенный подарок больше не у отправителя"
 
+            fee_ton = 0.0
             if offer["top_up_ton"] > 0:
                 charged = await con.fetchrow(
                     """UPDATE users SET balance_ton = balance_ton - $1
@@ -811,9 +818,10 @@ async def accept_trade_offer(offer_id: int) -> str:
                 )
                 if not charged:
                     return "У отправителя не хватает баланса на доплату"
+                fee_ton = offer["top_up_ton"] * market_fee
                 await con.execute(
                     "UPDATE users SET balance_ton = balance_ton + $1 WHERE user_id=$2",
-                    offer["top_up_ton"], offer["to_user_id"],
+                    offer["top_up_ton"] - fee_ton, offer["to_user_id"],
                 )
 
             await con.execute(
@@ -843,8 +851,9 @@ async def accept_trade_offer(offer_id: int) -> str:
                 "UPDATE trade_listings SET status='completed' WHERE trade_id=$1", offer["trade_id"]
             )
             await con.execute(
-                "UPDATE trade_offers SET status='accepted', resolved_at=NOW() WHERE offer_id=$1",
-                offer_id,
+                """UPDATE trade_offers SET status='accepted', resolved_at=NOW(), fee_ton=$1
+                   WHERE offer_id=$2""",
+                fee_ton, offer_id,
             )
             await con.execute(
                 """UPDATE trade_offers SET status='declined', resolved_at=NOW()
@@ -900,7 +909,7 @@ async def get_user_completed_trades(user_id: int, limit: int = 10) -> list:
     """Завершённые обмены (принятые офферы), где пользователь — любая из сторон."""
     pool = await get_pool()
     rows = await pool.fetch(
-        f"""SELECT o.offer_id, o.resolved_at as completed_at, o.top_up_ton,
+        f"""SELECT o.offer_id, o.resolved_at as completed_at, o.top_up_ton, o.fee_ton,
                    o.from_user_id, t.owner_id as to_user_id,
                    ufrom.username as from_username, uto.username as to_username,
                    {_TRADE_OFFER_GIFTS_SUBQ}

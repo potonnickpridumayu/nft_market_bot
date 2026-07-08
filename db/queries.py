@@ -823,6 +823,11 @@ async def accept_trade_offer(offer_id: int, market_fee: float = 0.0) -> str:
                     "UPDATE users SET balance_ton = balance_ton + $1 WHERE user_id=$2",
                     offer["top_up_ton"] - fee_ton, offer["to_user_id"],
                 )
+                logger.info(
+                    "🔄💰 Обмен offer_id=%s: доплата %.4f GRAM, комиссия %.4f GRAM удержана (получатель %s получил %.4f)",
+                    offer_id, offer["top_up_ton"], fee_ton, offer["to_user_id"],
+                    offer["top_up_ton"] - fee_ton,
+                )
 
             await con.execute(
                 "UPDATE gifts SET owner_id=$1, acquired_at=NOW() WHERE gift_id = ANY($2::bigint[])",

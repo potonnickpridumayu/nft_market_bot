@@ -357,6 +357,64 @@ async def get_gift_by_tg_id(tg_owned_gift_id: str):
     )
 
 
+async def get_gift_by_identity(gift_name: str, gift_number: str) -> Optional[dict]:
+    """Уникальный TG-гифт однозначно определяется парой (имя коллекции, номер) —
+    используется, чтобы распознать повторный занос уже известного физического
+    подарка (после вывода из Rubuy Bank и обратного ре-трансфера) вместо
+    создания дубликат-строки."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT * FROM gifts WHERE gift_name=$1 AND gift_number=$2",
+        gift_name, gift_number,
+    )
+    return dict(row) if row else None
+
+
+async def reclaim_tg_gift(gift_id: int, new_owner_id: Optional[int], tg_owned_gift_id: str,
+                          gift_name: str, gift_number: str,
+                          tg_sticker: str, tg_thumb: str, tg_backdrop: str):
+    """Тот же физический TG-гифт занесён повторно — Telegram выдаёт новый
+    owned_gift_id на каждый ре-трансфер, поэтому lookup только по нему не
+    ловит повторный занос: раньше это плодило дубликат-строку с гифтом,
+    а старая так и висела с уже неактуальным владельцем навсегда. Здесь вместо
+    этого обновляем существующую строку и снимаем любые активные лоты/обмены,
+    заведённые под старым владельцем, — иначе они зависли бы на чужом теперь
+    подарке (тот же паттерн, что и в accept_trade_offer)."""
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        async with con.transaction():
+            await con.execute(
+                """UPDATE gifts SET owner_id=$1, tg_owned_gift_id=$2, gift_name=$3,
+                       gift_number=$4, tg_sticker=$5, tg_thumb=$6, tg_backdrop=$7,
+                       acquired_at=NOW()
+                   WHERE gift_id=$8""",
+                new_owner_id, tg_owned_gift_id, gift_name, gift_number,
+                tg_sticker, tg_thumb, tg_backdrop, gift_id,
+            )
+            await con.execute(
+                "UPDATE listings SET status='cancelled' WHERE gift_id=$1 AND status='active'",
+                gift_id,
+            )
+            await con.execute(
+                "UPDATE auctions SET status='ended' WHERE gift_id=$1 AND status='active'",
+                gift_id,
+            )
+            await con.execute(
+                """UPDATE trade_listings SET status='cancelled'
+                   WHERE status='active' AND trade_id IN (
+                       SELECT trade_id FROM trade_listing_gifts WHERE gift_id=$1
+                   )""",
+                gift_id,
+            )
+            await con.execute(
+                """UPDATE trade_offers SET status='cancelled', resolved_at=NOW()
+                   WHERE status='pending' AND offer_id IN (
+                       SELECT offer_id FROM trade_offer_gifts WHERE gift_id=$1
+                   )""",
+                gift_id,
+            )
+
+
 # ── Business connection (Rubuy Bank) ──────────────────────────────────────────
 
 async def upsert_business_connection(connection_id: str, business_user_id: Optional[int],

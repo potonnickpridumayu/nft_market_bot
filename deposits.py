@@ -33,6 +33,8 @@ from db.queries import (
     touch_unmatched_event,
     get_gift_by_nft_address,
     get_gift_by_tg_id,
+    get_gift_by_identity,
+    reclaim_tg_gift,
     set_gift_tg_id,
     get_or_create_user,
     transfer_gift,
@@ -421,6 +423,53 @@ async def process_tg_gifts() -> None:
 
         # Имена полей сверяем по первым живым payload'ам — логируем целиком
         logger.info("🎁 Новый TG-подарок, raw: %s", json.dumps(g, ensure_ascii=False))
+
+        # Тот же физический TG-гифт (коллекция+номер уникальны) уже есть у нас
+        # под другим owned_gift_id — Telegram выдаёт новый owned_gift_id на
+        # каждый ре-трансфер (вывод из Rubuy Bank и повторный занос), так что
+        # lookup выше по owned_gift_id этого не ловит. Раньше это плодило
+        # дубликат-строку, а старая зависала с уже неактуальным владельцем.
+        dup = await get_gift_by_identity(gift_name, gift_number) if gift_number else None
+        if dup:
+            sender = g.get("sender_user")
+            sender_id = sender["id"] if sender and sender.get("id") else None
+            if sender_id:
+                full_name = " ".join(
+                    p for p in [sender.get("first_name"), sender.get("last_name")] if p
+                )
+                await get_or_create_user(sender_id, sender.get("username", "") or "", full_name)
+            await reclaim_tg_gift(
+                dup["gift_id"], sender_id, owned_gift_id,
+                gift_name, gift_number, tg_sticker, tg_thumb, tg_backdrop,
+            )
+            logger.info(
+                "♻️ TG-гифт переоформлен (ре-депозит): %s #%s → user %s "
+                "(gift_id=%s, было owned=%s → стало %s)",
+                gift_name, gift_number, sender_id, dup["gift_id"],
+                dup.get("tg_owned_gift_id"), owned_gift_id,
+            )
+            if sender_id:
+                gift_slug = _gift_slug_from(gift_name, gift_number)
+                link_line = (
+                    f'\n🔗 <a href="https://t.me/nft/{gift_slug}">t.me/nft/{gift_slug}</a>'
+                    if gift_slug else ""
+                )
+                await _notify_user(
+                    sender_id,
+                    f"🎁 <b>Подарок получен в Rubuy!</b>\n\n"
+                    f"✨ {gift_name}{' #' + gift_number if gift_number else ''}\n"
+                    f"Смотри в 💼 Портфеле — можно выставить на продажу "
+                    f"или вернуть обратно в Telegram."
+                    + link_line
+                )
+            else:
+                await _notify_admins(
+                    f"⚠️ <b>Анонимный ре-депозит в Rubuy Bank</b>\n\n"
+                    f"🎁 {gift_name}{' #' + gift_number if gift_number else ''}\n"
+                    f"🆔 gift_id: {dup['gift_id']}\n\n"
+                    f"Отправитель скрыл личность — подарок помечен unclaimed."
+                )
+            continue
 
         sender = g.get("sender_user")
         if not sender or not sender.get("id"):

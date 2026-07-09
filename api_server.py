@@ -13,7 +13,7 @@ from typing import Optional, List
 from urllib.parse import parse_qsl
 
 from contextlib import asynccontextmanager
-from db.queries import init_db, close_pool, get_gift, get_deposit_source, set_listing_status, release_gift, set_gift_owner, gift_is_locked, delete_gift
+from db.queries import init_db, close_pool, get_gift, get_deposit_source, set_listing_status, release_gift, set_gift_owner, gift_is_locked, delete_gift, get_gift_locks
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -1178,6 +1178,17 @@ async def admin_cancel_listing(
     _check_admin(x_admin_token)
     await cancel_listing(listing_id)
     return {"ok": True}
+
+
+@app.get("/api/admin/gifts/{gift_id}/locks")
+async def admin_gift_locks(
+        gift_id: int,
+        x_admin_token: Optional[str] = Header(None),
+):
+    """Диагностика: чем именно занят гифт (лот/аукцион/обмен/оффер), раз прямой
+    доступ к Postgres с локальной машины порезан провайдером."""
+    _check_admin(x_admin_token)
+    return await get_gift_locks(gift_id)
 
 
 @app.delete("/api/admin/gifts/{gift_id}")

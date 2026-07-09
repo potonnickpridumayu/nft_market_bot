@@ -1362,6 +1362,29 @@ async def gift_is_locked(gift_id: int) -> bool:
         gift_id,
     )
 
+async def get_gift_locks(gift_id: int) -> dict:
+    """То же, что gift_is_locked, но возвращает КОНКРЕТНЫЕ id — для админ-
+    диагностики зависших гифтов (прямой доступ к Postgres с локальной машины
+    порезан провайдером, см. rubuy_project_overview)."""
+    pool = await get_pool()
+    listings = [dict(r) for r in await pool.fetch(
+        "SELECT listing_id, status FROM listings WHERE gift_id=$1 AND status='active'", gift_id)]
+    auctions = [dict(r) for r in await pool.fetch(
+        "SELECT auction_id, status FROM auctions WHERE gift_id=$1 AND status='active'", gift_id)]
+    trade_listings_rows = [dict(r) for r in await pool.fetch(
+        """SELECT t.trade_id, t.status FROM trade_listing_gifts tlg
+           JOIN trade_listings t ON tlg.trade_id=t.trade_id
+           WHERE tlg.gift_id=$1 AND t.status='active'""", gift_id)]
+    trade_offers_rows = [dict(r) for r in await pool.fetch(
+        """SELECT o.offer_id, o.trade_id, o.status FROM trade_offer_gifts tog
+           JOIN trade_offers o ON tog.offer_id=o.offer_id
+           WHERE tog.gift_id=$1 AND o.status='pending'""", gift_id)]
+    return {
+        "listings": listings, "auctions": auctions,
+        "trade_listings": trade_listings_rows, "trade_offers": trade_offers_rows,
+    }
+
+
 async def get_gift_by_nft_address(nft_address: str) -> Optional[dict]:
     pool = await get_pool()
     row = await pool.fetchrow(

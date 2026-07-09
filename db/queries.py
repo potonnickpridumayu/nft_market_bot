@@ -351,9 +351,25 @@ async def set_gift_tg_id(gift_id: int, tg_owned_gift_id: str):
 
 async def delete_gift(gift_id: int):
     """Ручное удаление ошибочной/дубликат-строки (админ-эндпоинт) — напр.
-    задвоенный TG-гифт, заведённый до фикса реконсиляции ре-депозитов."""
+    задвоенный TG-гифт, заведённый до фикса реконсиляции ре-депозитов.
+    gift_is_locked (проверяется до вызова) гарантирует отсутствие АКТИВНЫХ
+    лотов/аукционов/обменов, но неактивные (cancelled/sold/ended) строки всё
+    равно ссылаются на gift_id по FK — чистим их же перед удалением, не трогая
+    сами родительские trade_listings/trade_offers (в них может быть несколько
+    других гифтов)."""
     pool = await get_pool()
-    await pool.execute("DELETE FROM gifts WHERE gift_id=$1", gift_id)
+    async with pool.acquire() as con:
+        async with con.transaction():
+            await con.execute("DELETE FROM listings WHERE gift_id=$1", gift_id)
+            await con.execute("DELETE FROM auctions WHERE gift_id=$1", gift_id)
+            await con.execute("DELETE FROM trade_listing_gifts WHERE gift_id=$1", gift_id)
+            await con.execute("DELETE FROM trade_offer_gifts WHERE gift_id=$1", gift_id)
+            # Легаси прямые FK-колонки одно-подарочной эры обмена (см. комментарий
+            # у CREATE TABLE trade_listing_gifts) — обнуляем, а не трогаем сам ряд,
+            # источник истины для новых обменов теперь junction-таблицы выше.
+            await con.execute("UPDATE trade_listings SET gift_id=NULL WHERE gift_id=$1", gift_id)
+            await con.execute("UPDATE trade_offers SET offered_gift_id=NULL WHERE offered_gift_id=$1", gift_id)
+            await con.execute("DELETE FROM gifts WHERE gift_id=$1", gift_id)
 
 
 async def get_gift_by_tg_id(tg_owned_gift_id: str):

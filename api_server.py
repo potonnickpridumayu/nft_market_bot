@@ -1144,7 +1144,7 @@ async def admin_overview(x_admin_token: Optional[str] = Header(None)):
 
 
 class ReassignBody(BaseModel):
-    user_id: int
+    user_id: Optional[int] = None  # None → снять владельца (unclaimed), без удаления строки
 
 
 @app.post("/api/admin/gifts/{gift_id}/reassign")
@@ -1153,14 +1153,18 @@ async def admin_reassign_gift(
         body: ReassignBody,
         x_admin_token: Optional[str] = Header(None),
 ):
-    """Ручная привязка подарка (unclaimed / ошибочная атрибуция) к юзеру."""
+    """Ручная привязка подарка (unclaimed / ошибочная атрибуция) к юзеру, либо
+    (user_id=None) снятие владельца — напр. чтобы убрать дубликат-гифт с
+    портфеля тестового аккаунта, не удаляя саму строку (сохраняет ссылки из
+    transactions на реальные прошлые продажи по этому gift_id нетронутыми)."""
     _check_admin(x_admin_token)
     gift = await get_gift(gift_id)
     if not gift:
         raise HTTPException(404, "Gift not found")
     if await gift_is_locked(gift_id):
         raise HTTPException(409, "Gift is on sale — cancel the listing first")
-    await get_or_create_user(body.user_id, "", "")
+    if body.user_id is not None:
+        await get_or_create_user(body.user_id, "", "")
     await set_gift_owner(gift_id, body.user_id)
     logger.info("👮 Admin: gift %s переприсвоен user %s (был %s)",
                 gift_id, body.user_id, gift.get("owner_id"))

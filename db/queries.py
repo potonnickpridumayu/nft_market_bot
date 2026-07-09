@@ -349,6 +349,13 @@ async def set_gift_tg_id(gift_id: int, tg_owned_gift_id: str):
     )
 
 
+async def delete_gift(gift_id: int):
+    """Ручное удаление ошибочной/дубликат-строки (админ-эндпоинт) — напр.
+    задвоенный TG-гифт, заведённый до фикса реконсиляции ре-депозитов."""
+    pool = await get_pool()
+    await pool.execute("DELETE FROM gifts WHERE gift_id=$1", gift_id)
+
+
 async def get_gift_by_tg_id(tg_owned_gift_id: str):
     pool = await get_pool()
     return await pool.fetchrow(

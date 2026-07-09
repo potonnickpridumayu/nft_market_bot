@@ -13,7 +13,7 @@ from typing import Optional, List
 from urllib.parse import parse_qsl
 
 from contextlib import asynccontextmanager
-from db.queries import init_db, close_pool, get_gift, get_deposit_source, set_listing_status, release_gift, set_gift_owner, gift_is_locked
+from db.queries import init_db, close_pool, get_gift, get_deposit_source, set_listing_status, release_gift, set_gift_owner, gift_is_locked, delete_gift
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -1178,6 +1178,25 @@ async def admin_cancel_listing(
     _check_admin(x_admin_token)
     await cancel_listing(listing_id)
     return {"ok": True}
+
+
+@app.delete("/api/admin/gifts/{gift_id}")
+async def admin_delete_gift(
+        gift_id: int,
+        x_admin_token: Optional[str] = Header(None),
+):
+    """Ручное удаление ошибочной/дубликат-строки гифта (напр. задвоенный
+    TG-гифт, заведённый до фикса реконсиляции ре-депозитов в process_tg_gifts)."""
+    _check_admin(x_admin_token)
+    gift = await get_gift(gift_id)
+    if not gift:
+        raise HTTPException(404, "Gift not found")
+    if await gift_is_locked(gift_id):
+        raise HTTPException(409, "Gift is on sale/trade — cancel that first")
+    await delete_gift(gift_id)
+    logger.info("👮 Admin: gift %s удалён (был owner=%s, %s #%s)",
+                gift_id, gift.get("owner_id"), gift.get("gift_name"), gift.get("gift_number"))
+    return {"ok": True, "deleted_gift_id": gift_id}
 
 if __name__ == "__main__":
     import uvicorn

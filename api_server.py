@@ -1113,7 +1113,14 @@ async def tg_file_proxy(file_id: str):
     return Response(
         content=blob,
         media_type=media_type,
-        headers={"Cache-Control": "public, max-age=86400, immutable"},
+        headers={
+            "Cache-Control": "public, max-age=86400, immutable",
+            # Всегда, а не только при Origin в запросе: файл кешируется в
+            # браузере на сутки, и если первый запрос был без CORS (обычный
+            # <img>), закешированный ответ без этого заголовка ломает
+            # последующие CORS-загрузки того же URL (fetch, CSS mask-image).
+            "Access-Control-Allow-Origin": "*",
+        },
     )
 
 

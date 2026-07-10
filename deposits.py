@@ -60,6 +60,13 @@ _last_intent_sweep = 0.0
 DEPOSIT_PREFIX = "GS-DEP-"
 MIN_DEPOSIT_TON = 0.05  # отсечка от пыли и случайных переводов
 
+# Подарки, выведенные из сторонних маркетов, формально присылает их бот-банк,
+# а не человек — такие депозиты сразу зачисляем реальному владельцу.
+# Ключ: user_id формального отправителя; значение: user_id реального владельца.
+TG_SENDER_ALIASES = {
+    8184312603: 5762973275,  # "MRKT Bank" (бот mrkt) -> @twentop
+}
+
 
 def _gift_slug_from(name: str, number) -> str:
     """Собирает слаг t.me/nft из имени коллекции и номера — те же правила,
@@ -433,7 +440,10 @@ async def process_tg_gifts() -> None:
         if dup:
             sender = g.get("sender_user")
             sender_id = sender["id"] if sender and sender.get("id") else None
-            if sender_id:
+            if sender_id in TG_SENDER_ALIASES:
+                sender_id = TG_SENDER_ALIASES[sender_id]
+                await get_or_create_user(sender_id, "", "")
+            elif sender_id:
                 full_name = " ".join(
                     p for p in [sender.get("first_name"), sender.get("last_name")] if p
                 )
@@ -497,10 +507,14 @@ async def process_tg_gifts() -> None:
             continue
 
         sender_id = sender["id"]
-        full_name = " ".join(
-            p for p in [sender.get("first_name"), sender.get("last_name")] if p
-        )
-        await get_or_create_user(sender_id, sender.get("username", "") or "", full_name)
+        if sender_id in TG_SENDER_ALIASES:
+            sender_id = TG_SENDER_ALIASES[sender_id]
+            await get_or_create_user(sender_id, "", "")
+        else:
+            full_name = " ".join(
+                p for p in [sender.get("first_name"), sender.get("last_name")] if p
+            )
+            await get_or_create_user(sender_id, sender.get("username", "") or "", full_name)
 
         gift_id = await add_gift(
             owner_id=sender_id,

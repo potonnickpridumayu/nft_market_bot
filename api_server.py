@@ -52,7 +52,7 @@ from db.queries import (
 )
 
 # Комиссия (GRAM) за вывод нативного TG-подарка — окупает 25 Stars трансфера
-GIFT_WITHDRAW_FEE: float = float(os.getenv("GIFT_WITHDRAW_FEE_TON", "0.2"))
+GIFT_WITHDRAW_FEE: float = float(os.getenv("GIFT_WITHDRAW_FEE_TON", "0.25"))
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -856,8 +856,11 @@ async def withdraw_gift(
     if not gift or gift.get("owner_id") != user["id"]:
         raise HTTPException(404, "Gift not found")
 
-    if await gift_is_locked(gift_id):
-        raise HTTPException(409, "Gift is on sale — cancel the listing first")
+    locks = await get_gift_locks(gift_id)
+    if any(locks.values()):
+        in_trade = locks["trade_listings"] or locks["trade_offers"]
+        raise HTTPException(409, "Подарок находится в обмене" if in_trade
+                            else "Подарок находится на продаже")
 
     tg_owned_gift_id = gift.get("tg_owned_gift_id") or ""
     if tg_owned_gift_id:

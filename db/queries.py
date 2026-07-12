@@ -967,7 +967,9 @@ async def record_transaction(buyer_id: int, seller_id: int, gift_id: int,
                 "UPDATE users SET total_spent=total_spent+$1 WHERE user_id=$2",
                 amount_ton, buyer_id,
             )
-            seller_net = amount_ton - fee_ton - ref_bonus_ton
+            # Реф-бонус идёт из комиссии площадки, поэтому в заработанное
+            # продавцу засчитываем ровно amount − fee (как и реально выплачено).
+            seller_net = amount_ton - fee_ton
             await con.execute(
                 "UPDATE users SET total_earned=total_earned+$1 WHERE user_id=$2",
                 seller_net, seller_id,
@@ -1140,7 +1142,9 @@ async def accept_listing_offer(offer_id: int, market_fee: float, referral_bonus_
             if not charged:
                 return "У покупателя не хватает баланса", None
 
-            seller_net = price - fee - ref_bonus
+            # Реф-бонус платится ИЗ комиссии площадки (как в buy_listing):
+            # продавец получает ровно price − fee, наша доля = fee − ref_bonus.
+            seller_net = price - fee
             await con.execute(
                 "UPDATE users SET balance_ton = balance_ton + $1 WHERE user_id=$2",
                 seller_net, seller_id,

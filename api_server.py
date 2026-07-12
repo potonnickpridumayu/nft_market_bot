@@ -354,9 +354,10 @@ async def buy_listing(
             400, f"Insufficient balance: {buyer['balance_ton']:.4f} TON, need {price:.4f}"
         )
 
-    # Движение средств
+    # Движение средств. Реф-бонус платится ИЗ комиссии площадки (наша доля
+    # становится fee − ref_bonus), продавец получает ровно обещанные price − fee.
     await update_balance(buyer_id, -price)
-    seller_net = price - fee - ref_bonus
+    seller_net = price - fee
     await update_balance(seller_id, seller_net)
 
     # Перевод гифта покупателю

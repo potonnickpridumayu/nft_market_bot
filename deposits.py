@@ -146,7 +146,9 @@ async def process_ton_deposits() -> None:
 
 # ── C-4: подтверждение исходящих выводов TON ──────────────────────────────────
 
-WITHDRAWAL_RE = re.compile(r"GiftSafe: withdrawal #(\d+)")
+# Принимаем оба префикса: «GiftSafe» — выводы, отправленные до ребрендинга
+# комментария на «ruby» (иначе зависшие в полёте выводы не подтвердятся).
+WITHDRAWAL_RE = re.compile(r"(?:GiftSafe|ruby): withdrawal #(\d+)")
 # Сколько ждём ончейн-подтверждения до возврата баланса. Защита от двойной
 # выплаты при лаге индексатора toncenter: если вернуть слишком рано, а
 # транзакция потом "проявится" — юзер получит и TON, и рефанд. Для тестов
@@ -466,7 +468,7 @@ async def process_tg_gifts() -> None:
                 )
                 await _notify_user(
                     sender_id,
-                    f"🎁 <b>Подарок получен в Rubuy!</b>\n\n"
+                    f"🎁 <b>Подарок получен в ruby!</b>\n\n"
                     f"✨ {gift_name}{' #' + gift_number if gift_number else ''}\n"
                     f"Смотри в 💼 Портфеле — можно выставить на продажу "
                     f"или вернуть обратно в Telegram."
@@ -474,7 +476,7 @@ async def process_tg_gifts() -> None:
                 )
             else:
                 await _notify_admins(
-                    f"⚠️ <b>Анонимный ре-депозит в Rubuy Bank</b>\n\n"
+                    f"⚠️ <b>Анонимный ре-депозит в сейф ruby</b>\n\n"
                     f"🎁 {gift_name}{' #' + gift_number if gift_number else ''}\n"
                     f"🆔 gift_id: {dup['gift_id']}\n\n"
                     f"Отправитель скрыл личность — подарок помечен unclaimed."
@@ -499,7 +501,7 @@ async def process_tg_gifts() -> None:
                 gift_id, owned_gift_id,
             )
             await _notify_admins(
-                f"⚠️ <b>Анонимный подарок в Rubuy Bank</b>\n\n"
+                f"⚠️ <b>Анонимный подарок в сейфе ruby</b>\n\n"
                 f"🎁 {gift_name}{' #' + gift_number if gift_number else ''}\n"
                 f"🆔 gift_id: {gift_id}\n\n"
                 f"Отправитель скрыл личность — нужна ручная привязка к юзеру."
@@ -538,7 +540,7 @@ async def process_tg_gifts() -> None:
         )
         await _notify_user(
             sender_id,
-            f"🎁 <b>Подарок получен в Rubuy!</b>\n\n"
+            f"🎁 <b>Подарок получен в ruby!</b>\n\n"
             f"✨ {gift_name}{' #' + gift_number if gift_number else ''}\n"
             f"Смотри в 💼 Портфеле — можно выставить на продажу "
             f"или вернуть обратно в Telegram."

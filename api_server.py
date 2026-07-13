@@ -1,4 +1,4 @@
-"""FastAPI сервер для GiftSafe Mini App"""
+"""FastAPI сервер для ruby Mini App"""
 import hmac
 import hashlib
 import json
@@ -82,7 +82,7 @@ async def lifespan(app: FastAPI):
     poller.cancel()
     await close_pool()
 
-app = FastAPI(title="GiftSafe API", lifespan=lifespan)
+app = FastAPI(title="ruby API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -868,7 +868,7 @@ async def withdraw_gift(
         # ── Нативный Telegram-подарок: возврат на аккаунт владельца, без адреса ──
         import tg_gifts
         if not await tg_gifts.is_configured():
-            raise HTTPException(503, "Rubuy Bank временно недоступен, попробуйте позже")
+            raise HTTPException(503, "Сейф ruby временно недоступен, попробуйте позже")
 
         # Комиссия за передачу: покрывает Stars, которые Telegram списывает
         # с бизнес-аккаунта за transferGift. Списываем до отправки, при фейле
@@ -914,7 +914,7 @@ async def withdraw_gift(
     try:
         from escrow_wallet import send_nft
         tx = await send_nft(nft_address, to_address,
-                            comment="GiftSafe: NFT delivery")
+                            comment="ruby: NFT delivery")
     except Exception as e:
         await set_gift_owner(gift_id, user["id"])
         logger.warning("Gift withdraw failed for gift %s: %s", gift_id, e)
@@ -972,7 +972,7 @@ async def withdraw_balance(
         from escrow_wallet import send_ton
         # Уникальный комментарий — по нему поллер подтвердит вывод в блокчейне.
         tx = await send_ton(to_address, amount,
-                            comment=f"GiftSafe: withdrawal #{wd_id}")
+                            comment=f"ruby: withdrawal #{wd_id}")
         await mark_withdrawal_sent(wd_id, tx)
     except Exception as e:
         # НЕ возвращаем баланс сразу: исключение не гарантирует, что TON не ушли

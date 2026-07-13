@@ -25,7 +25,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 WELCOME_TEXT = (
-    "💎 <b>Добро пожаловать в Rubuy!</b>\n\n"
+    "💎 <b>Добро пожаловать в ruby!</b>\n\n"
     "Маркет подарков Telegram: покупай, продавай и выводи "
     "NFT-гифты за TON.\n\n"
     "Открывай маркет кнопкой меню ниже 👇"

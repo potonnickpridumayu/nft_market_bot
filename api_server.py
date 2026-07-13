@@ -444,13 +444,13 @@ async def create_listing_offer_endpoint(
 
     min_amount = lst["price_ton"] * MIN_OFFER_FRACTION
     if body.amount_ton < min_amount:
-        raise HTTPException(400, f"Оффер не может быть меньше {min_amount:.2f} GRAM (50% цены)")
+        raise HTTPException(400, f"Оффер не может быть меньше {min_amount:.2f} Gram (50% цены)")
 
     full_name = " ".join(p for p in [user.get("first_name"), user.get("last_name")] if p)
     db_user = await get_or_create_user(user["id"], user.get("username", ""), full_name)
     if db_user["balance_ton"] < body.amount_ton:
         raise HTTPException(
-            400, f"Недостаточно средств: баланс {db_user['balance_ton']:.2f} GRAM, нужно {body.amount_ton:.2f}"
+            400, f"Недостаточно средств: баланс {db_user['balance_ton']:.2f} Gram, для оффера требуется {body.amount_ton:.2f} Gram"
         )
 
     offer_id = await create_listing_offer(listing_id, user["id"], body.amount_ton)
@@ -460,8 +460,8 @@ async def create_listing_offer_endpoint(
         lst["seller_id"],
         f"💬 <b>Вам предложили цену!</b>\n\n"
         f"🎁 {lst['gift_name']} #{lst.get('gift_number','?')}\n"
-        f"🏷 Цена лота: {lst['price_ton']:.2f} GRAM\n"
-        f"💰 Предложено: {body.amount_ton:.2f} GRAM\n"
+        f"🏷 Цена лота: {lst['price_ton']:.2f} Gram\n"
+        f"💰 Предложено: {body.amount_ton:.2f} Gram\n"
         f"👤 От: @{from_name}\n\nСмотри в Профиле → Офферы."
     )
     return {"ok": True, "offer_id": offer_id}
@@ -498,7 +498,7 @@ async def accept_listing_offer_endpoint(
         result["buyer_id"],
         f"🎉 <b>Ваше предложение цены принято!</b>\n\n"
         f"🎁 {gift['gift_name']} #{gift.get('gift_number','?')}\n"
-        f"💰 Списано: {result['price']:.4f} GRAM\n\nСмотри в Портфеле."
+        f"💰 Списано: {result['price']:.4f} Gram\n\nСмотри в Портфеле."
     )
     return {"ok": True}
 
@@ -657,8 +657,8 @@ async def create_trade_offer_endpoint(
         if balance < body.top_up_ton - 1e-6:
             raise HTTPException(
                 400,
-                f"Недостаточно баланса для доплаты: на балансе {balance:.2f}, "
-                f"нужно {body.top_up_ton:.2f} GRAM"
+                f"Недостаточно баланса для доплаты: на балансе {balance:.2f} Gram, "
+                f"для доплаты требуется {body.top_up_ton:.2f} Gram"
             )
 
     trade = await get_trade_listing(trade_id)
@@ -688,7 +688,7 @@ async def create_trade_offer_endpoint(
         f"🔄 <b>Вам предложили обмен!</b>\n\n"
         f"🎁 За: {_gift_list_summary(trade['gifts'])}\n"
         f"🎁 Предлагают: {_gift_list_summary(offered_gifts)}"
-        + (f"\n💎 + доплата {body.top_up_ton:.2f} GRAM" if body.top_up_ton > 0 else "")
+        + (f"\n💎 + доплата {body.top_up_ton:.2f} Gram" if body.top_up_ton > 0 else "")
         + f"\n👤 От: @{from_name}\n\nСмотри в Профиле → Офферы."
     )
     return {"ok": True, "offer_id": offer_id}
@@ -877,7 +877,7 @@ async def withdraw_gift(
         if fee > 0 and not await try_charge_balance(user["id"], fee):
             raise HTTPException(
                 402,
-                f"Для вывода нужно {fee:g} GRAM на балансе — "
+                f"Для вывода нужно {fee:g} Gram на балансе — "
                 f"комиссия за передачу подарка",
             )
 

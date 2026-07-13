@@ -171,6 +171,9 @@ def fetch_gift_meta(url: str) -> dict:
         return {}
 
 
+MINIAPP_URL = os.getenv("MINIAPP_URL", "https://giftsafe.pages.dev")
+
+
 async def notify_seller(seller_id: int, text: str):
     """Best-effort уведомление продавцу в Telegram. Не роняет покупку при сбое.
 
@@ -185,6 +188,12 @@ async def notify_seller(seller_id: int, text: str):
             "chat_id": seller_id,
             "text": text,
             "parse_mode": "HTML",
+            # Кнопка «Открыть» под каждым уведомлением — сразу в Mini App
+            "reply_markup": {
+                "inline_keyboard": [[
+                    {"text": "Открыть", "web_app": {"url": MINIAPP_URL}}
+                ]]
+            },
         }).encode()
         req = urllib.request.Request(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",

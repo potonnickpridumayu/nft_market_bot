@@ -993,6 +993,42 @@ async def get_user_transactions(user_id: int, limit: int = 10) -> list:
     return [dict(r) for r in rows]
 
 
+async def get_recent_transactions(limit: int = 30) -> list:
+    """Последние продажи по всему маркету — публичная лента истории.
+    Без user_id/username: наружу отдаём только подарок, цену и время."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT t.amount_ton, t.completed_at,
+                  g.gift_name, g.collection_name, g.gift_number, g.nft_address
+           FROM transactions t
+           JOIN gifts g ON t.gift_id=g.gift_id
+           ORDER BY t.completed_at DESC LIMIT $1""",
+        limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_recent_completed_trades(limit: int = 30) -> list:
+    """Последние завершённые обмены — публичная лента истории маркета."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        f"""SELECT o.offer_id, o.resolved_at as completed_at, o.top_up_ton,
+                   {_TRADE_OFFER_GIFTS_SUBQ}
+           FROM trade_offers o
+           JOIN trade_listings t ON o.trade_id = t.trade_id
+           WHERE o.status='accepted'
+           ORDER BY o.resolved_at DESC LIMIT $1""",
+        limit,
+    )
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["target_gifts"] = _parse_json_list(d["target_gifts"])
+        d["offered_gifts"] = _parse_json_list(d["offered_gifts"])
+        result.append(d)
+    return result
+
+
 async def get_user_completed_trades(user_id: int, limit: int = 10) -> list:
     """Завершённые обмены (принятые офферы), где пользователь — любая из сторон."""
     pool = await get_pool()

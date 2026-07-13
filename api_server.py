@@ -24,6 +24,8 @@ from db.queries import (
     get_auction, place_bid, get_user_gifts, get_user,
     get_or_create_user, create_listing, add_gift,
     get_user_transactions, get_platform_stats,
+    # публичная лента истории маркета:
+    get_recent_transactions, get_recent_completed_trades,
     # для покупки:
     update_balance, transfer_gift, record_transaction,
     record_referral_payout, mark_listing_sold,get_or_create_deposit_intent, get_latest_intent_for_user,
@@ -801,6 +803,22 @@ async def profile(x_telegram_init_data: Optional[str] = Header(None)):
         "user": db_user, "transactions": history, "pending_offers": pending,
         "total_deals": total_deals,
     }
+
+
+# ===== MARKET HISTORY =====
+
+@app.get("/api/market/history")
+async def market_history():
+    """Публичная лента последних сделок маркета: продажи + завершённые обмены.
+    Анонимна — имена/ID участников наружу не отдаём."""
+    txs = await get_recent_transactions(limit=30)
+    trades = await get_recent_completed_trades(limit=30)
+    for tx in txs:
+        tx["kind"] = "sale"
+    for tr in trades:
+        tr["kind"] = "trade"
+    history = sorted(txs + trades, key=lambda x: x["completed_at"], reverse=True)[:40]
+    return {"history": history}
 
 
 # ===== STATS =====

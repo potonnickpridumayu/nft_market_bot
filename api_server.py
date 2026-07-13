@@ -218,7 +218,7 @@ async def listings(
 async def listing_detail(listing_id: int):
     item = await get_listing(listing_id)
     if not item:
-        raise HTTPException(404, "Listing not found")
+        raise HTTPException(404, "Лот не найден")
     return item
 
 
@@ -236,16 +236,16 @@ async def create_listing_endpoint(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
 
     if body.price <= 0:
-        raise HTTPException(400, "Price must be greater than 0")
+        raise HTTPException(400, "Цена должна быть больше нуля")
 
     # Новый путь: подарок уже задепозичен, создаём листинг по gift_id
     if body.gift_id:
         gift = await get_gift(body.gift_id)
         if not gift or gift["owner_id"] != user["id"]:
-            raise HTTPException(404, "Gift not found or not yours")
+            raise HTTPException(404, "Подарок не найден или принадлежит не вам")
         if await gift_is_locked(body.gift_id):
             raise HTTPException(409, "Этот подарок уже занят (продажа/аукцион/обмен)")
         try:
@@ -268,7 +268,7 @@ async def create_listing_endpoint(
         }
 
     if not body.gift_url:
-        raise HTTPException(400, "Either gift_id or gift_url is required")
+        raise HTTPException(400, "Укажите подарок для продажи")
 
     parsed = parse_gift_url(body.gift_url)
 
@@ -317,16 +317,16 @@ async def buy_listing(
 ):
     tg_user = get_user_from_header(x_telegram_init_data or "")
     if not tg_user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
 
     lst = await get_listing(listing_id)
     if not lst or lst["status"] != "active":
-        raise HTTPException(400, "Listing unavailable")
+        raise HTTPException(400, "Лот недоступен — уже продан или снят с продажи")
 
     buyer_id = tg_user["id"]
     seller_id = lst["seller_id"]
     if buyer_id == seller_id:
-        raise HTTPException(400, "Cannot buy your own listing")
+        raise HTTPException(400, "Нельзя купить собственный лот")
 
     # Гарантируем, что покупатель есть в БД (мог открыть Mini App, не нажимая /start в боте)
     full_name = " ".join(
@@ -351,7 +351,7 @@ async def buy_listing(
     # Демо-режим: списываем с внутреннего баланса. В проде — реальный TON-платёж.
     if buyer["balance_ton"] < price - 1e-6:
         raise HTTPException(
-            400, f"Insufficient balance: {buyer['balance_ton']:.4f} TON, need {price:.4f}"
+            400, f"Недостаточно средств: на балансе {buyer['balance_ton']:.4f} Gram, нужно {price:.4f} Gram"
         )
 
     # Движение средств. Реф-бонус платится ИЗ комиссии площадки (наша доля
@@ -434,13 +434,13 @@ async def create_listing_offer_endpoint(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
 
     lst = await get_listing(listing_id)
     if not lst or lst["status"] != "active":
-        raise HTTPException(404, "Listing not found")
+        raise HTTPException(404, "Лот не найден")
     if lst["seller_id"] == user["id"]:
-        raise HTTPException(400, "Cannot offer on your own listing")
+        raise HTTPException(400, "Нельзя предложить цену на собственный лот")
 
     min_amount = lst["price_ton"] * MIN_OFFER_FRACTION
     if body.amount_ton < min_amount:
@@ -471,7 +471,7 @@ async def create_listing_offer_endpoint(
 async def my_listing_offers(x_telegram_init_data: Optional[str] = Header(None)):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     return await get_user_listing_offers(user["id"])
 
 
@@ -482,12 +482,12 @@ async def accept_listing_offer_endpoint(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     offer = await get_listing_offer(offer_id)
     if not offer or offer["seller_id"] != user["id"]:
-        raise HTTPException(404, "Offer not found")
+        raise HTTPException(404, "Предложение не найдено")
     if offer["status"] != "pending":
-        raise HTTPException(409, "Offer is no longer pending")
+        raise HTTPException(409, "Предложение уже не активно")
 
     error, result = await accept_listing_offer(offer_id, MARKET_FEE, REFERRAL_BONUS_PERCENT)
     if error:
@@ -510,10 +510,10 @@ async def decline_listing_offer_endpoint(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     offer = await get_listing_offer(offer_id)
     if not offer or offer["seller_id"] != user["id"]:
-        raise HTTPException(404, "Offer not found")
+        raise HTTPException(404, "Предложение не найдено")
     await decline_listing_offer(offer_id)
     return {"ok": True}
 
@@ -525,10 +525,10 @@ async def cancel_listing_offer_endpoint(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     ok = await cancel_listing_offer(offer_id, user["id"])
     if not ok:
-        raise HTTPException(404, "Offer not found or not yours")
+        raise HTTPException(404, "Предложение не найдено или принадлежит не вам")
     return {"ok": True}
 
 
@@ -544,7 +544,7 @@ async def auctions(limit: int = 20, offset: int = 0):
 async def auction_detail(auction_id: int):
     item = await get_auction(auction_id)
     if not item:
-        raise HTTPException(404, "Auction not found")
+        raise HTTPException(404, "Аукцион не найден")
     return item
 
 
@@ -560,10 +560,10 @@ async def bid(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     ok = await place_bid(auction_id=auction_id, bidder_id=user["id"], amount=body.amount)
     if not ok:
-        raise HTTPException(400, "Bid too low or auction ended")
+        raise HTTPException(400, "Ставка слишком мала или аукцион завершён")
     return {"ok": True}
 
 
@@ -579,7 +579,7 @@ async def trades(limit: int = Query(20, le=50), offset: int = 0):
 async def trade_detail(trade_id: int):
     item = await get_trade_listing(trade_id)
     if not item:
-        raise HTTPException(404, "Trade listing not found")
+        raise HTTPException(404, "Объявление об обмене не найдено")
     return item
 
 
@@ -603,14 +603,14 @@ async def create_trade_endpoint(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     gift_ids = list(dict.fromkeys(body.gift_ids))  # без дублей, порядок сохраняем
     if not gift_ids:
         raise HTTPException(400, "Выберите хотя бы один подарок")
     for gift_id in gift_ids:
         gift = await get_gift(gift_id)
         if not gift or gift["owner_id"] != user["id"]:
-            raise HTTPException(404, "Gift not found or not yours")
+            raise HTTPException(404, "Подарок не найден или принадлежит не вам")
         if await gift_is_locked(gift_id):
             raise HTTPException(409, "Этот подарок уже занят (продажа/аукцион/обмен)")
     trade_id = await create_trade_listing(gift_ids, user["id"], body.note)
@@ -624,10 +624,10 @@ async def cancel_trade_endpoint(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     trade = await get_trade_listing(trade_id)
     if not trade or trade["owner_id"] != user["id"]:
-        raise HTTPException(404, "Trade listing not found")
+        raise HTTPException(404, "Объявление об обмене не найдено")
     await cancel_trade_listing(trade_id)
     return {"ok": True}
 
@@ -645,9 +645,9 @@ async def create_trade_offer_endpoint(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     if body.top_up_ton < 0:
-        raise HTTPException(400, "top_up_ton must be >= 0")
+        raise HTTPException(400, "Доплата не может быть отрицательной")
     if body.top_up_ton > 0:
         db_user = await get_user(user["id"])
         balance = db_user["balance_ton"] if db_user else 0.0
@@ -663,9 +663,9 @@ async def create_trade_offer_endpoint(
 
     trade = await get_trade_listing(trade_id)
     if not trade or trade["status"] != "active":
-        raise HTTPException(404, "Trade listing not found")
+        raise HTTPException(404, "Объявление об обмене не найдено")
     if trade["owner_id"] == user["id"]:
-        raise HTTPException(400, "Cannot offer on your own trade listing")
+        raise HTTPException(400, "Нельзя предложить обмен на собственное объявление")
 
     gift_ids = list(dict.fromkeys(body.offered_gift_ids))
     if not gift_ids:
@@ -674,7 +674,7 @@ async def create_trade_offer_endpoint(
     for gift_id in gift_ids:
         gift = await get_gift(gift_id)
         if not gift or gift["owner_id"] != user["id"]:
-            raise HTTPException(404, "Offered gift not found or not yours")
+            raise HTTPException(404, "Предлагаемый подарок не найден или принадлежит не вам")
         if await gift_is_locked(gift_id):
             raise HTTPException(409, "Этот подарок уже занят (продажа/аукцион/обмен)")
         offered_gifts.append(gift)
@@ -698,7 +698,7 @@ async def create_trade_offer_endpoint(
 async def my_trade_offers(x_telegram_init_data: Optional[str] = Header(None)):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     return await get_user_trade_offers(user["id"])
 
 
@@ -709,12 +709,12 @@ async def accept_trade_offer_endpoint(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     offer = await get_trade_offer(offer_id)
     if not offer or offer["to_user_id"] != user["id"]:
-        raise HTTPException(404, "Offer not found")
+        raise HTTPException(404, "Предложение не найдено")
     if offer["status"] != "pending":
-        raise HTTPException(409, "Offer is no longer pending")
+        raise HTTPException(409, "Предложение уже не активно")
 
     error = await accept_trade_offer(offer_id, MARKET_FEE)
     if error:
@@ -734,10 +734,10 @@ async def decline_trade_offer_endpoint(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     offer = await get_trade_offer(offer_id)
     if not offer or offer["to_user_id"] != user["id"]:
-        raise HTTPException(404, "Offer not found")
+        raise HTTPException(404, "Предложение не найдено")
     await decline_trade_offer(offer_id)
     return {"ok": True}
 
@@ -749,10 +749,10 @@ async def cancel_trade_offer_endpoint(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     ok = await cancel_trade_offer(offer_id, user["id"])
     if not ok:
-        raise HTTPException(404, "Offer not found or not yours")
+        raise HTTPException(404, "Предложение не найдено или принадлежит не вам")
     return {"ok": True}
 
 
@@ -762,7 +762,7 @@ async def cancel_trade_offer_endpoint(
 async def portfolio(x_telegram_init_data: Optional[str] = Header(None)):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     gifts = await get_user_gifts(user["id"])
     result = []
     for g in gifts:
@@ -784,7 +784,7 @@ async def portfolio(x_telegram_init_data: Optional[str] = Header(None)):
 async def profile(x_telegram_init_data: Optional[str] = Header(None)):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     db_user = await get_user(user["id"])
     txs = await get_user_transactions(user["id"], limit=25)
     trades = await get_user_completed_trades(user["id"], limit=25)
@@ -820,9 +820,9 @@ async def create_deposit_intent_endpoint(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     if not ton_client.is_configured():
-        raise HTTPException(503, "Escrow wallet is not configured")
+        raise HTTPException(503, "Сервис временно недоступен — кошелёк-сейф не настроен")
 
     full_name = " ".join(
         p for p in [user.get("first_name"), user.get("last_name")] if p
@@ -851,11 +851,11 @@ async def withdraw_gift(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
 
     gift = await get_gift(gift_id)
     if not gift or gift.get("owner_id") != user["id"]:
-        raise HTTPException(404, "Gift not found")
+        raise HTTPException(404, "Подарок не найден")
 
     locks = await get_gift_locks(gift_id)
     if any(locks.values()):
@@ -900,13 +900,13 @@ async def withdraw_gift(
 
     nft_address = gift.get("nft_address") or ""
     if not nft_address:
-        raise HTTPException(409, "No on-chain NFT behind this gift")
+        raise HTTPException(409, "У этого подарка нет NFT в блокчейне TON")
 
     to_address = (body.to_address or "").strip()
     if not ADDR_RE.match(to_address):
-        raise HTTPException(400, "Invalid TON address")
+        raise HTTPException(400, "Неверный адрес TON-кошелька")
     if to_address == ton_client.TON_WALLET_ADDRESS:
-        raise HTTPException(400, "Cannot withdraw to the escrow wallet")
+        raise HTTPException(400, "Нельзя выводить на кошелёк-сейф сервиса")
 
     # Снимаем владение ДО отправки — чтобы гифт нельзя было выставить,
     # пока транзакция в полёте. При фейле откатываем.
@@ -918,7 +918,7 @@ async def withdraw_gift(
     except Exception as e:
         await set_gift_owner(gift_id, user["id"])
         logger.warning("Gift withdraw failed for gift %s: %s", gift_id, e)
-        raise HTTPException(502, "NFT transfer failed, gift restored")
+        raise HTTPException(502, "Не удалось отправить NFT — подарок возвращён в портфель")
 
     return {"ok": True, "tx": tx, "sent_to": to_address}
 
@@ -935,7 +935,7 @@ async def withdraw_balance(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
 
     amount = round(body.amount, 2)
     if amount < MIN_WITHDRAW_TON:
@@ -943,9 +943,9 @@ async def withdraw_balance(
 
     to_address = body.to_address.strip()
     if not ADDR_RE.match(to_address):
-        raise HTTPException(400, "Invalid TON address")
+        raise HTTPException(400, "Неверный адрес TON-кошелька")
     if to_address == ton_client.TON_WALLET_ADDRESS:
-        raise HTTPException(400, "Cannot withdraw to the escrow wallet")
+        raise HTTPException(400, "Нельзя выводить на кошелёк-сейф сервиса")
 
     # Гард: на сейфе должно хватать TON (+ запас на сетевую комиссию), иначе
     # ончейн-отправка провалится и юзер зря прождёт 15-минутный рефанд C-4.
@@ -1001,21 +1001,21 @@ async def change_listing_price(
     """Смена цены своего активного лота."""
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     if body.price <= 0:
         raise HTTPException(400, "Цена должна быть больше нуля")
 
     listing = await get_listing(listing_id)
     if not listing:
-        raise HTTPException(404, "Listing not found")
+        raise HTTPException(404, "Лот не найден")
     if listing["seller_id"] != user["id"]:
-        raise HTTPException(403, "Not your listing")
+        raise HTTPException(403, "Это не ваш лот")
     if listing["status"] != "active":
-        raise HTTPException(409, "Listing is not active")
+        raise HTTPException(409, "Лот уже не активен")
 
     price = round(body.price, 4)
     if not await set_listing_price(listing_id, price):
-        raise HTTPException(409, "Listing is not active")
+        raise HTTPException(409, "Лот уже не активен")
     return {"ok": True, "price": price}
 
 
@@ -1030,15 +1030,15 @@ async def withdraw_listing(
     Ончейн-возврат на кошелёк — отдельная ручка /api/gifts/{id}/withdraw."""
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
 
     listing = await get_listing(listing_id)
     if not listing:
-        raise HTTPException(404, "Listing not found")
+        raise HTTPException(404, "Лот не найден")
     if listing["seller_id"] != user["id"]:
-        raise HTTPException(403, "Not your listing")
+        raise HTTPException(403, "Это не ваш лот")
     if listing["status"] != "active":
-        raise HTTPException(409, "Listing is not active")
+        raise HTTPException(409, "Лот уже не активен")
 
     await set_listing_status(listing_id, "cancelled")
     return {"ok": True, "delisted": True, "gift_id": listing["gift_id"]}
@@ -1049,7 +1049,7 @@ async def deposit_intent_status(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     intent = await get_latest_intent_for_user(user["id"])
     if not intent:
         return {"status": "none"}
@@ -1066,7 +1066,7 @@ async def referral_stats(
 ):
     user = get_user_from_header(x_telegram_init_data or "")
     if not user:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     return await get_referral_stats(user["id"])
 
 
@@ -1080,7 +1080,7 @@ FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{20,200}$")
 @app.get("/api/tg-file/{file_id}")
 async def tg_file_proxy(file_id: str):
     if not BOT_TOKEN or not FILE_ID_RE.match(file_id):
-        raise HTTPException(404, "Not found")
+        raise HTTPException(404, "Не найдено")
 
     def _fetch() -> tuple[bytes, str]:
         req = urllib.request.Request(
@@ -1101,7 +1101,7 @@ async def tg_file_proxy(file_id: str):
         blob, file_path = await asyncio.to_thread(_fetch)
     except Exception as e:
         logger.warning("tg-file proxy %s: %s", file_id[:16], e)
-        raise HTTPException(404, "File unavailable")
+        raise HTTPException(404, "Файл недоступен")
 
     ext = file_path.rsplit(".", 1)[-1].lower()
     media_type = {
@@ -1135,7 +1135,7 @@ async def tg_file_proxy(file_id: str):
 
 def _check_admin(token: Optional[str]) -> None:
     if not BOT_TOKEN or token != BOT_TOKEN:
-        raise HTTPException(401, "Unauthorized")
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
 
 
 @app.get("/api/admin/overview")
@@ -1171,9 +1171,9 @@ async def admin_reassign_gift(
     _check_admin(x_admin_token)
     gift = await get_gift(gift_id)
     if not gift:
-        raise HTTPException(404, "Gift not found")
+        raise HTTPException(404, "Подарок не найден")
     if await gift_is_locked(gift_id):
-        raise HTTPException(409, "Gift is on sale — cancel the listing first")
+        raise HTTPException(409, "Подарок на продаже — сначала снимите лот")
     if body.user_id is not None:
         await get_or_create_user(body.user_id, "", "")
     await set_gift_owner(gift_id, body.user_id)
@@ -1216,9 +1216,9 @@ async def admin_delete_gift(
     _check_admin(x_admin_token)
     gift = await get_gift(gift_id)
     if not gift:
-        raise HTTPException(404, "Gift not found")
+        raise HTTPException(404, "Подарок не найден")
     if await gift_is_locked(gift_id):
-        raise HTTPException(409, "Gift is on sale/trade — cancel that first")
+        raise HTTPException(409, "Подарок на продаже или в обмене — сначала снимите")
     await delete_gift(gift_id)
     logger.info("👮 Admin: gift %s удалён (был owner=%s, %s #%s)",
                 gift_id, gift.get("owner_id"), gift.get("gift_name"), gift.get("gift_number"))

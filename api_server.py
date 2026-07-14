@@ -1076,7 +1076,7 @@ async def withdraw_listing(
         raise HTTPException(409, "Лот уже не активен")
 
     await set_listing_status(listing_id, "cancelled")
-    await record_market_event("delist", listing["gift_id"])
+    await record_market_event("delist", listing["gift_id"], price_ton=listing["price_ton"])
     return {"ok": True, "delisted": True, "gift_id": listing["gift_id"]}
 
 @app.get("/api/escrow/deposit-intent")

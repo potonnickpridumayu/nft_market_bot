@@ -26,6 +26,9 @@ from db.queries import (
     get_user_transactions, get_platform_stats,
     # публичная лента истории маркета:
     get_recent_transactions, get_recent_completed_trades,
+    record_market_event, get_recent_market_events,
+    # реферальные начисления в историю профиля:
+    get_user_referral_payouts,
     # для покупки:
     update_balance, transfer_gift, record_transaction,
     record_referral_payout, mark_listing_sold,get_or_create_deposit_intent, get_latest_intent_for_user,
@@ -262,6 +265,7 @@ async def create_listing_endpoint(
             if "uq_listings_active_gift" in str(e):
                 raise HTTPException(409, "Этот подарок уже выставлен на продажу")
             raise
+        await record_market_event("list", body.gift_id, price_ton=body.price)
         return {
             "ok": True,
             "listing_id": listing_id,
@@ -309,6 +313,7 @@ async def create_listing_endpoint(
         price_ton=body.price,
         description=body.description,
     )
+    await record_market_event("list", gift_id, price_ton=body.price)
     return {"ok": True, "listing_id": listing_id, "gift_id": gift_id, "gift_name": gift_name}
 
 
@@ -790,12 +795,16 @@ async def profile(x_telegram_init_data: Optional[str] = Header(None)):
     db_user = await get_user(user["id"])
     txs = await get_user_transactions(user["id"], limit=25)
     trades = await get_user_completed_trades(user["id"], limit=25)
+    refs = await get_user_referral_payouts(user["id"], limit=25)
     total_deals = await get_user_deal_count(user["id"])
     for tx in txs:
         tx["kind"] = "sale"
     for tr in trades:
         tr["kind"] = "trade"
-    history = sorted(txs + trades, key=lambda x: x["completed_at"], reverse=True)[:25]
+    for rp in refs:
+        rp["kind"] = "ref"
+    history = sorted(txs + trades + refs,
+                     key=lambda x: x["completed_at"], reverse=True)[:30]
     trade_offers = await get_user_trade_offers(user["id"])
     listing_offers = await get_user_listing_offers(user["id"])
     pending = len(trade_offers["incoming"]) + len(listing_offers["incoming"])
@@ -813,11 +822,15 @@ async def market_history():
     Анонимна — имена/ID участников наружу не отдаём."""
     txs = await get_recent_transactions(limit=30)
     trades = await get_recent_completed_trades(limit=30)
+    events = await get_recent_market_events(limit=30)
     for tx in txs:
         tx["kind"] = "sale"
     for tr in trades:
         tr["kind"] = "trade"
-    history = sorted(txs + trades, key=lambda x: x["completed_at"], reverse=True)[:40]
+    for ev in events:
+        ev["kind"] = ev.pop("event_type")  # list / delist / price
+    history = sorted(txs + trades + events,
+                     key=lambda x: x["completed_at"], reverse=True)[:60]
     return {"history": history}
 
 
@@ -1034,6 +1047,10 @@ async def change_listing_price(
     price = round(body.price, 4)
     if not await set_listing_price(listing_id, price):
         raise HTTPException(409, "Лот уже не активен")
+    await record_market_event(
+        "price", listing["gift_id"],
+        price_ton=price, old_price_ton=listing["price_ton"],
+    )
     return {"ok": True, "price": price}
 
 
@@ -1059,6 +1076,7 @@ async def withdraw_listing(
         raise HTTPException(409, "Лот уже не активен")
 
     await set_listing_status(listing_id, "cancelled")
+    await record_market_event("delist", listing["gift_id"])
     return {"ok": True, "delisted": True, "gift_id": listing["gift_id"]}
 
 @app.get("/api/escrow/deposit-intent")

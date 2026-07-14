@@ -245,6 +245,19 @@ CREATE TABLE IF NOT EXISTS listing_offers (
 );
 CREATE INDEX IF NOT EXISTS idx_listing_offers_listing ON listing_offers(listing_id);
 CREATE INDEX IF NOT EXISTS idx_listing_offers_from    ON listing_offers(from_user_id);
+
+-- Публичная лента маркета: размещение/снятие/смена цены лота. Продажи и
+-- обмены в ленту берутся из transactions/trade_offers, здесь только события
+-- самих лотов. Анонимно — user_id не храним.
+CREATE TABLE IF NOT EXISTS market_events (
+    event_id      BIGSERIAL PRIMARY KEY,
+    event_type    TEXT NOT NULL,                -- list / delist / price
+    gift_id       BIGINT REFERENCES gifts(gift_id),
+    price_ton     DOUBLE PRECISION,             -- цена (для price — новая)
+    old_price_ton DOUBLE PRECISION,             -- для price — прежняя цена
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_market_events_created ON market_events(created_at DESC);
 """
 
 
@@ -995,15 +1008,63 @@ async def get_user_transactions(user_id: int, limit: int = 10) -> list:
 
 async def get_recent_transactions(limit: int = 30) -> list:
     """Последние продажи по всему маркету — публичная лента истории.
-    Без user_id/username: наружу отдаём только подарок, цену и время."""
+    Без user_id/username: наружу отдаём только подарок, цену и время.
+    tg_backdrop нужен фронту для фильтров по модели/фону/символу."""
     pool = await get_pool()
     rows = await pool.fetch(
         """SELECT t.amount_ton, t.completed_at,
-                  g.gift_name, g.collection_name, g.gift_number, g.nft_address
+                  g.gift_name, g.collection_name, g.gift_number, g.nft_address,
+                  g.tg_backdrop
            FROM transactions t
            JOIN gifts g ON t.gift_id=g.gift_id
            ORDER BY t.completed_at DESC LIMIT $1""",
         limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def record_market_event(event_type: str, gift_id: int,
+                              price_ton: Optional[float] = None,
+                              old_price_ton: Optional[float] = None):
+    """Событие лота для публичной ленты: list / delist / price."""
+    pool = await get_pool()
+    await pool.execute(
+        """INSERT INTO market_events (event_type, gift_id, price_ton, old_price_ton)
+           VALUES ($1,$2,$3,$4)""",
+        event_type, gift_id, price_ton, old_price_ton,
+    )
+
+
+async def get_recent_market_events(limit: int = 30) -> list:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT e.event_type, e.price_ton, e.old_price_ton,
+                  e.created_at as completed_at,
+                  g.gift_name, g.collection_name, g.gift_number, g.nft_address,
+                  g.tg_backdrop
+           FROM market_events e
+           JOIN gifts g ON e.gift_id=g.gift_id
+           ORDER BY e.created_at DESC LIMIT $1""",
+        limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_user_referral_payouts(user_id: int, limit: int = 25) -> list:
+    """Реферальные начисления пользователю — для истории сделок в профиле."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT p.amount_ton, p.created_at as completed_at,
+                  u.username as referral_username,
+                  t.amount_ton as sale_amount_ton,
+                  g.gift_name, g.gift_number, g.nft_address
+           FROM referral_payouts p
+           JOIN users u ON p.from_user_id = u.user_id
+           LEFT JOIN transactions t ON p.tx_id = t.tx_id
+           LEFT JOIN gifts g ON t.gift_id = g.gift_id
+           WHERE p.referrer_id=$1
+           ORDER BY p.created_at DESC LIMIT $2""",
+        user_id, limit,
     )
     return [dict(r) for r in rows]
 

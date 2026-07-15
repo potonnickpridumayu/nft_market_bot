@@ -1187,6 +1187,45 @@ async def admin_reset_for_mainnet(
     }
 
 
+@app.post("/api/admin/reset-referral-earnings")
+async def admin_reset_referral_earnings(
+        body: ResetForMainnetBody,
+        x_admin_token: Optional[str] = Header(None),
+):
+    """Обнуляет «Заработано» на странице Рефералов, не трогая «Приглашено».
+
+    Две цифры берутся из разных мест (get_referral_stats): «Приглашено» — это
+    COUNT по users.referred_by, «Заработано» — SUM по referral_payouts. Поэтому
+    выплаты можно снести целиком, а приглашённые останутся на месте.
+
+    Нужно потому, что 0.105 Gram заработка — наследие testnet: реальных денег за
+    ним нет. Побочно из истории профиля исчезнут строки «Реферал @X продал…» —
+    это те же самые записи."""
+    _check_admin(x_admin_token)
+    if body.confirm != "ОБНУЛИТЬ ПЕРЕД MAINNET":
+        raise HTTPException(400, "Неверная фраза подтверждения — ничего не сделано")
+
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        async with con.transaction():
+            row = await con.fetchrow(
+                "SELECT COUNT(*) AS n, COALESCE(SUM(amount_ton), 0) AS total FROM referral_payouts")
+            await con.execute("DELETE FROM referral_payouts")
+            invited = await con.fetch(
+                "SELECT referred_by, COUNT(*) AS n FROM users "
+                "WHERE referred_by IS NOT NULL GROUP BY referred_by")
+
+    logger.warning("RESET рефералов: удалено выплат %s на %.4f Gram",
+                   row["n"], float(row["total"]))
+    return {
+        "ok": True,
+        "payouts_deleted": row["n"],
+        "earnings_zeroed_total": float(row["total"]),
+        # Проверка, что приглашённые уцелели
+        "invited_still_counted": {str(r["referred_by"]): r["n"] for r in invited},
+    }
+
+
 @app.get("/api/admin/db-tables")
 async def admin_db_tables(x_admin_token: Optional[str] = Header(None)):
     """Таблицы и число строк в них. Прямого доступа к Postgres с локальной

@@ -1166,6 +1166,75 @@ async def admin_overview(x_admin_token: Optional[str] = Header(None)):
     return {"users": users, "gifts": gifts, "business_connections": conns}
 
 
+@app.get("/api/admin/solvency")
+async def admin_solvency(x_admin_token: Optional[str] = Header(None)):
+    """Платёжеспособность: покрывает ли сейф обязательства перед пользователями.
+
+    Главный инвариант: БАЛАНС СЕЙФА ≥ ОБЯЗАТЕЛЬСТВА. Каждый Gram на балансе —
+    это обещание отдать TON с сейфа по первому требованию; если сейфа не
+    хватает, вывод упрётся в 503 (гард в withdraw_balance), а обещание
+    останется невыполненным. Комиссия площадки нигде не зачисляется — она
+    просто не выдаётся, и оседает на сейфе как излишек сверх обязательств.
+    Поэтому surplus — это и есть заработок, который можно снять руками.
+
+    Обязательства = балансы + выводы «в полёте». Выводы в статусах pending/sent
+    уже списаны с баланса, но ещё могут вернуться рефандом (C-4), поэтому
+    считаются обязательством, пока не confirmed.
+
+    ВНИМАНИЕ, чего здесь нет: суммы депозитов (escrow_events хранит только
+    хеш и статус, без суммы — сверять приход надо по блокчейну) и комиссий за
+    вывод подарка (GIFT_WITHDRAW_FEE списывается с баланса и нигде не пишется,
+    так что fees_recorded их занижает)."""
+    _check_admin(x_admin_token)
+    pool = await get_pool()
+
+    users_total = float(await pool.fetchval(
+        "SELECT COALESCE(SUM(balance_ton), 0) FROM users") or 0)
+    in_flight = float(await pool.fetchval(
+        "SELECT COALESCE(SUM(amount_ton), 0) FROM withdrawals "
+        "WHERE status IN ('pending', 'sent')") or 0)
+    paid_out = float(await pool.fetchval(
+        "SELECT COALESCE(SUM(amount_ton), 0) FROM withdrawals "
+        "WHERE status = 'confirmed'") or 0)
+
+    tx = await pool.fetchrow(
+        "SELECT COALESCE(SUM(fee_ton), 0) AS fees, COALESCE(SUM(ref_bonus_ton), 0) AS refs "
+        "FROM transactions")
+    trade_fees = float(await pool.fetchval(
+        "SELECT COALESCE(SUM(fee_ton), 0) FROM trade_offers WHERE status='accepted'") or 0)
+
+    try:
+        escrow = await ton_client.get_wallet_balance()
+    except Exception as e:
+        logger.warning("Solvency: баланс сейфа недоступен: %s", e)
+        escrow = None
+
+    liabilities = users_total + in_flight
+    surplus = None if escrow is None else escrow - liabilities
+
+    return {
+        "network": ton_client.TON_NETWORK,
+        "escrow_address": ton_client.TON_WALLET_ADDRESS,
+        "escrow_balance": escrow,
+        "liabilities": {
+            "users_balance_total": users_total,
+            "withdrawals_in_flight": in_flight,
+            "total": liabilities,
+        },
+        # Положительный surplus = накопленная комиссия, лежащая на сейфе.
+        # Отрицательный = сейф НЕ покрывает обязательства, выводы упрутся в 503.
+        "surplus": surplus,
+        "ok": None if surplus is None else surplus >= 0,
+        "fees_recorded": {
+            "market": float(tx["fees"]),
+            "trade_top_up": trade_fees,
+            "referral_paid": float(tx["refs"]),
+            "net": float(tx["fees"]) + trade_fees - float(tx["refs"]),
+        },
+        "withdrawals_confirmed_total": paid_out,
+    }
+
+
 class ReassignBody(BaseModel):
     user_id: Optional[int] = None  # None → снять владельца (unclaimed), без удаления строки
 

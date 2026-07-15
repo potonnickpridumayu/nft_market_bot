@@ -1201,6 +1201,107 @@ async def cancel_listing_offer(offer_id: int, from_user_id: int) -> bool:
     return row is not None
 
 
+async def buy_listing_atomic(listing_id: int, buyer_id: int, market_fee: float,
+                             referral_bonus_percent: float):
+    """Атомарно продаёт лот покупателю по цене лота. Возвращает (error, result):
+    error='' и result-дикт при успехе, иначе человеко-читаемая причина.
+
+    Зеркалит accept_listing_offer: тот же лок строк и та же денежная математика.
+    Без транзакции здесь были две гонки на реальные деньги — два покупателя
+    успевали пройти проверку status='active' до того, как первый её погасит
+    (оба платили, подарок доставался одному), а двойной тап по «Купить» дважды
+    проходил проверку баланса и уводил его в минус."""
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        async with con.transaction():
+            lst = await con.fetchrow(
+                "SELECT * FROM listings WHERE listing_id=$1 FOR UPDATE", listing_id)
+            if not lst or lst["status"] != "active":
+                return "Лот недоступен — уже продан или снят с продажи", None
+
+            seller_id = lst["seller_id"]
+            if seller_id == buyer_id:
+                return "Нельзя купить собственный лот", None
+
+            price = lst["price_ton"]
+            fee = price * market_fee
+
+            # Порядок локов: покупатель → продавец по возрастанию user_id, иначе
+            # встречные покупки двух юзеров друг у друга словят дедлок.
+            first, second = sorted((buyer_id, seller_id))
+            rows = {r["user_id"]: r for r in await con.fetch(
+                "SELECT user_id, balance_ton, referred_by FROM users "
+                "WHERE user_id = ANY($1::bigint[]) ORDER BY user_id FOR UPDATE",
+                [first, second])}
+            buyer = rows.get(buyer_id)
+            seller = rows.get(seller_id)
+            if not buyer:
+                return "Покупатель не найден", None
+
+            if float(buyer["balance_ton"]) < price - 1e-6:
+                return (f"Недостаточно средств: на балансе "
+                        f"{float(buyer['balance_ton']):.4f} Gram, нужно {price:.4f} Gram"), None
+
+            # Гард от самореферала: покупатель-рефер продавца не получает бонус
+            # со своей же покупки (иначе это скрытая скидка на лоты рефералов).
+            ref_bonus = 0.0
+            referrer = seller["referred_by"] if seller else None
+            if referrer and referrer != buyer_id:
+                ref_bonus = price * referral_bonus_percent
+            else:
+                referrer = None
+
+            # Реф-бонус платится ИЗ комиссии площадки: продавец получает ровно
+            # price − fee, наша доля = fee − ref_bonus.
+            seller_net = price - fee
+
+            await con.execute(
+                "UPDATE users SET balance_ton = balance_ton - $1 WHERE user_id=$2",
+                price, buyer_id)
+            await con.execute(
+                "UPDATE users SET balance_ton = balance_ton + $1 WHERE user_id=$2",
+                seller_net, seller_id)
+            await con.execute(
+                "UPDATE gifts SET owner_id=$1, acquired_at=NOW() WHERE gift_id=$2",
+                buyer_id, lst["gift_id"])
+            await con.execute(
+                "UPDATE listings SET status='sold', sold_at=NOW() WHERE listing_id=$1",
+                listing_id)
+
+            tx_id = await con.fetchval(
+                """INSERT INTO transactions
+                   (buyer_id, seller_id, gift_id, amount_ton, fee_ton, ref_bonus_ton, source, source_id)
+                   VALUES ($1,$2,$3,$4,$5,$6,'listing',$7) RETURNING tx_id""",
+                buyer_id, seller_id, lst["gift_id"], price, fee, ref_bonus, listing_id)
+            await con.execute(
+                "UPDATE users SET total_spent=total_spent+$1 WHERE user_id=$2", price, buyer_id)
+            await con.execute(
+                "UPDATE users SET total_earned=total_earned+$1 WHERE user_id=$2",
+                seller_net, seller_id)
+
+            if ref_bonus > 0 and referrer:
+                await con.execute(
+                    "UPDATE users SET balance_ton = balance_ton + $1 WHERE user_id=$2",
+                    ref_bonus, referrer)
+                await con.execute(
+                    """INSERT INTO referral_payouts (referrer_id, from_user_id, tx_id, amount_ton)
+                       VALUES ($1,$2,$3,$4)""",
+                    referrer, seller_id, tx_id, ref_bonus)
+
+            # Прямая покупка гасит лот — висящие офферы по нему больше неактуальны
+            # (как и при accept_listing_offer, иначе они вечно висят в «Офферах»).
+            await con.execute(
+                """UPDATE listing_offers SET status='declined', resolved_at=NOW()
+                   WHERE listing_id=$1 AND status='pending'""",
+                listing_id)
+
+    return "", {
+        "buyer_id": buyer_id, "seller_id": seller_id, "gift_id": lst["gift_id"],
+        "price": price, "fee": fee, "seller_net": seller_net, "tx_id": tx_id,
+        "ref_bonus": ref_bonus, "referrer_id": referrer,
+    }
+
+
 async def accept_listing_offer(offer_id: int, market_fee: float, referral_bonus_percent: float):
     """Атомарно продаёт лот покупателю по цене оффера (а не цене лота).
     Возвращает (error, result): error='' и result-дикт при успехе."""

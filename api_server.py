@@ -30,6 +30,7 @@ from db.queries import (
     # реферальные начисления в историю профиля:
     get_user_referral_payouts,
     # для покупки:
+    buy_listing_atomic,
     update_balance, transfer_gift, record_transaction,
     record_referral_payout, mark_listing_sold,get_or_create_deposit_intent, get_latest_intent_for_user,
     # C-4: надёжные выводы TON:
@@ -338,57 +339,24 @@ async def buy_listing(
 
     buyer_id = tg_user["id"]
     seller_id = lst["seller_id"]
-    if buyer_id == seller_id:
-        raise HTTPException(400, "Нельзя купить собственный лот")
 
     # Гарантируем, что покупатель есть в БД (мог открыть Mini App, не нажимая /start в боте)
     full_name = " ".join(
         p for p in [tg_user.get("first_name"), tg_user.get("last_name")] if p
     )
-    buyer = await get_or_create_user(buyer_id, tg_user.get("username", ""), full_name)
+    await get_or_create_user(buyer_id, tg_user.get("username", ""), full_name)
 
-    price = lst["price_ton"]
-    fee = price * MARKET_FEE
-
-    seller = await get_user(seller_id)
-    ref_bonus = 0.0
-    # Гард от самореферала: покупатель-рефер продавца не получает бонус
-    # со своей же покупки (иначе это скрытая скидка на лоты своих рефералов).
-    if (
-            seller
-            and seller.get("referred_by")
-            and seller["referred_by"] != buyer_id
-    ):
-        ref_bonus = price * REFERRAL_BONUS_PERCENT
-
-    # Демо-режим: списываем с внутреннего баланса. В проде — реальный TON-платёж.
-    if buyer["balance_ton"] < price - 1e-6:
-        raise HTTPException(
-            400, f"Недостаточно средств: на балансе {buyer['balance_ton']:.4f} Gram, нужно {price:.4f} Gram"
-        )
-
-    # Движение средств. Реф-бонус платится ИЗ комиссии площадки (наша доля
-    # становится fee − ref_bonus), продавец получает ровно обещанные price − fee.
-    await update_balance(buyer_id, -price)
-    seller_net = price - fee
-    await update_balance(seller_id, seller_net)
-
-    # Перевод гифта покупателю
-    await transfer_gift(lst["gift_id"], buyer_id)
-
-    # Помечаем лот проданным
-    await mark_listing_sold(listing_id)
-
-    # Запись транзакции (внутри обновляет total_spent / total_earned)
-    tx_id = await record_transaction(
-        buyer_id, seller_id, lst["gift_id"],
-        price, fee, ref_bonus, "listing", listing_id
+    # Все проверки и всё движение средств — в одной транзакции под локом строк:
+    # цена, баланс и статус лота перечитываются там же, где меняются.
+    err, res = await buy_listing_atomic(
+        listing_id, buyer_id, MARKET_FEE, REFERRAL_BONUS_PERCENT
     )
+    if err:
+        raise HTTPException(400, err)
 
-    # Реферальная выплата
-    if ref_bonus > 0 and seller.get("referred_by"):
-        await update_balance(seller["referred_by"], ref_bonus)
-        await record_referral_payout(seller["referred_by"], seller_id, tx_id, ref_bonus)
+    price = res["price"]
+    fee = res["fee"]
+    seller_net = res["seller_net"]
 
     # Ссылка на сам подарок (t.me/nft/<slug>). Для подарков из Rubuy Bank
     # nft_address пуст — собираем слаг из имени и номера.
@@ -406,7 +374,7 @@ async def buy_listing(
         seller_id,
         f"🎉 <b>Ваш подарок продан!</b>\n\n"
         f"🎁 {lst['gift_name']} #{lst.get('gift_number','?')}\n"
-        f"💰 Вы получили: {seller_net:.4f} TON\n"
+        f"💰 Вы получили: {seller_net:.4f} Gram\n"
         f"👤 Покупатель: @{buyer_name}"
         + link_line
     )
@@ -416,7 +384,7 @@ async def buy_listing(
         buyer_id,
         f"✅ <b>Покупка совершена!</b>\n\n"
         f"🎁 {lst['gift_name']} #{lst.get('gift_number','?')}\n"
-        f"💰 Списано: {price:.4f} TON"
+        f"💰 Списано: {price:.4f} Gram"
         + link_line
     )
 

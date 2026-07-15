@@ -7,3 +7,4 @@ mint_test_nft.py
 node_modules/
 __pycache__/
 *.pyc
+old_seed.txt

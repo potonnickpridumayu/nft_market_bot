@@ -1,6 +1,7 @@
 """FastAPI сервер для ruby Mini App"""
 import hmac
 import hashlib
+import base64
 import json
 import os
 import re
@@ -827,6 +828,45 @@ async def create_deposit_intent_endpoint(
 
 ADDR_RE = re.compile(r"^(-?\d+:[0-9a-fA-F]{64}|[A-Za-z0-9_-]{48})$")
 
+
+def _addr_is_testnet_form(addr: str) -> Optional[bool]:
+    """Записан ли адрес в тестовой форме (0Q…/kQ…). None — форма без пометки
+    сети: сырой вид `0:hex` или нераспознанное.
+
+    В user-friendly адресе старший бит тега = флаг testnet. Это ЛИШЬ пометка
+    отображения: кошелёк в основной сети её отбрасывает и шлёт на тот же сырой
+    адрес в mainnet. Поэтому она и опасна — см. _check_addr_network."""
+    if ":" in addr:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(addr)
+    except Exception:
+        return None
+    if len(raw) != 36:
+        return None
+    return bool(raw[0] & 0x80)
+
+
+def _check_addr_network(addr: str) -> None:
+    """Не даём выводить на адрес из ЧУЖОЙ сети.
+
+    Зачем: кошелёк версии W5 имеет РАЗНЫЕ адреса в mainnet и testnet (сетевой
+    идентификатор входит в state init). Если у пользователя кошелёк подключён в
+    тестовом режиме, TonConnect отдаст адрес в форме 0Q…, ADDR_RE его пропустит,
+    и настоящие TON уйдут на адрес, которым в основной сети он НЕ управляет.
+    Ровно так 2026-07-15 были потеряны (и с трудом возвращены) 2 TON."""
+    is_test_form = _addr_is_testnet_form(addr)
+    if is_test_form is None:
+        return  # сырой формат — сети не несёт, проверять нечего
+    if is_test_form != (ton_client.TON_NETWORK == "testnet"):
+        raise HTTPException(
+            400,
+            "Кошелёк подключён к другой сети. Сервис работает в "
+            f"{'тестовой' if ton_client.TON_NETWORK == 'testnet' else 'основной'} сети — "
+            "переключите кошелёк и подключите заново, иначе деньги уйдут на адрес, "
+            "которым вы не сможете распорядиться",
+        )
+
 class WithdrawBody(BaseModel):
     to_address: Optional[str] = None  # нужен только для ончейн-NFT
 
@@ -892,6 +932,7 @@ async def withdraw_gift(
     to_address = (body.to_address or "").strip()
     if not ADDR_RE.match(to_address):
         raise HTTPException(400, "Неверный адрес TON-кошелька")
+    _check_addr_network(to_address)
     if to_address == ton_client.TON_WALLET_ADDRESS:
         raise HTTPException(400, "Нельзя выводить на кошелёк-сейф сервиса")
 
@@ -931,6 +972,7 @@ async def withdraw_balance(
     to_address = body.to_address.strip()
     if not ADDR_RE.match(to_address):
         raise HTTPException(400, "Неверный адрес TON-кошелька")
+    _check_addr_network(to_address)
     if to_address == ton_client.TON_WALLET_ADDRESS:
         raise HTTPException(400, "Нельзя выводить на кошелёк-сейф сервиса")
 

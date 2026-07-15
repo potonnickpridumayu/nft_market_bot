@@ -20,8 +20,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 from db.queries import (
-    get_active_listings, get_listing, get_active_auctions,
-    get_auction, place_bid, get_user_gifts, get_user,
+    get_active_listings, get_listing, get_user_gifts, get_user,
     get_or_create_user, create_listing, add_gift,
     get_user_transactions, get_platform_stats,
     # публичная лента истории маркета:
@@ -510,41 +509,6 @@ async def cancel_listing_offer_endpoint(
     ok = await cancel_listing_offer(offer_id, user["id"])
     if not ok:
         raise HTTPException(404, "Предложение не найдено или принадлежит не вам")
-    return {"ok": True}
-
-
-# ===== AUCTIONS =====
-
-@app.get("/api/auctions")
-async def auctions(limit: int = 20, offset: int = 0):
-    items = await get_active_auctions(limit=limit, offset=offset)
-    return {"auctions": items}
-
-
-@app.get("/api/auctions/{auction_id}")
-async def auction_detail(auction_id: int):
-    item = await get_auction(auction_id)
-    if not item:
-        raise HTTPException(404, "Аукцион не найден")
-    return item
-
-
-class BidBody(BaseModel):
-    amount: float
-
-
-@app.post("/api/auctions/{auction_id}/bid")
-async def bid(
-    auction_id: int,
-    body: BidBody,
-    x_telegram_init_data: Optional[str] = Header(None),
-):
-    user = get_user_from_header(x_telegram_init_data or "")
-    if not user:
-        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
-    ok = await place_bid(auction_id=auction_id, bidder_id=user["id"], amount=body.amount)
-    if not ok:
-        raise HTTPException(400, "Ставка слишком мала или аукцион завершён")
     return {"ok": True}
 
 

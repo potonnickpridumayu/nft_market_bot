@@ -99,28 +99,6 @@ CREATE TABLE IF NOT EXISTS listings (
     sold_at     TIMESTAMPTZ
 );
 
-CREATE TABLE IF NOT EXISTS auctions (
-    auction_id     BIGSERIAL PRIMARY KEY,
-    gift_id        BIGINT REFERENCES gifts(gift_id),
-    seller_id      BIGINT REFERENCES users(user_id),
-    start_price    DOUBLE PRECISION NOT NULL,
-    current_price  DOUBLE PRECISION NOT NULL,
-    min_step       DOUBLE PRECISION NOT NULL DEFAULT 0,
-    buyout_price   DOUBLE PRECISION,
-    ends_at        TIMESTAMPTZ,
-    status         TEXT NOT NULL DEFAULT 'active',
-    current_bidder BIGINT,
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS bids (
-    bid_id     BIGSERIAL PRIMARY KEY,
-    auction_id BIGINT REFERENCES auctions(auction_id),
-    bidder_id  BIGINT REFERENCES users(user_id),
-    amount     DOUBLE PRECISION NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
 CREATE TABLE IF NOT EXISTS transactions (
     tx_id         BIGSERIAL PRIMARY KEY,
     buyer_id      BIGINT REFERENCES users(user_id),
@@ -154,6 +132,31 @@ CREATE TABLE IF NOT EXISTS withdrawals (
     sent_at      TIMESTAMPTZ,
     confirmed_at TIMESTAMPTZ
 );
+
+-- Аукционы удалены вместе с legacy-кодом бота: их заменил Обмен, фронт их не
+-- звал, ручки были мёртвые. Дроп нарочно сделан самозащитным — если в таблицах
+-- вдруг окажутся строки, он НЕ выполнится и оставит предупреждение в логах.
+-- Так удалить живые данные невозможно даже по ошибке.
+DO $$
+DECLARE n_auctions BIGINT := 0; n_bids BIGINT := 0;
+BEGIN
+    IF to_regclass('public.auctions') IS NULL AND to_regclass('public.bids') IS NULL THEN
+        RETURN;  -- уже удалены прошлым деплоем
+    END IF;
+    IF to_regclass('public.auctions') IS NOT NULL THEN
+        EXECUTE 'SELECT COUNT(*) FROM auctions' INTO n_auctions;
+    END IF;
+    IF to_regclass('public.bids') IS NOT NULL THEN
+        EXECUTE 'SELECT COUNT(*) FROM bids' INTO n_bids;
+    END IF;
+    IF n_auctions = 0 AND n_bids = 0 THEN
+        DROP TABLE IF EXISTS bids;      -- сначала bids: FK смотрит на auctions
+        DROP TABLE IF EXISTS auctions;
+        RAISE WARNING 'legacy: таблицы auctions/bids удалены (были пусты)';
+    ELSE
+        RAISE WARNING 'legacy: auctions=%, bids=% — НЕ пусты, дроп пропущен', n_auctions, n_bids;
+    END IF;
+END $$;
 
 ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'processed';
 ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
@@ -374,7 +377,6 @@ async def delete_gift(gift_id: int):
     async with pool.acquire() as con:
         async with con.transaction():
             await con.execute("DELETE FROM listings WHERE gift_id=$1", gift_id)
-            await con.execute("DELETE FROM auctions WHERE gift_id=$1", gift_id)
             await con.execute("DELETE FROM trade_listing_gifts WHERE gift_id=$1", gift_id)
             await con.execute("DELETE FROM trade_offer_gifts WHERE gift_id=$1", gift_id)
             # Легаси прямые FK-колонки одно-подарочной эры обмена (см. комментарий
@@ -429,10 +431,6 @@ async def reclaim_tg_gift(gift_id: int, new_owner_id: Optional[int], tg_owned_gi
             )
             await con.execute(
                 "UPDATE listings SET status='cancelled' WHERE gift_id=$1 AND status='active'",
-                gift_id,
-            )
-            await con.execute(
-                "UPDATE auctions SET status='ended' WHERE gift_id=$1 AND status='active'",
                 gift_id,
             )
             await con.execute(
@@ -604,80 +602,6 @@ async def increment_views(listing_id: int):
     pool = await get_pool()
     await pool.execute(
         "UPDATE listings SET views=views+1 WHERE listing_id=$1", listing_id
-    )
-
-
-# ── Auctions ──────────────────────────────────────────────────────────────────
-
-async def create_auction(gift_id: int, seller_id: int, start_price: float,
-                          min_step: float, buyout_price: Optional[float],
-                          ends_at: str) -> int:
-    pool = await get_pool()
-    return await pool.fetchval(
-        """INSERT INTO auctions
-           (gift_id, seller_id, start_price, current_price, min_step, buyout_price, ends_at)
-           VALUES ($1,$2,$3,$3,$4,$5,$6) RETURNING auction_id""",
-        gift_id, seller_id, start_price, min_step, buyout_price, ends_at,
-    )
-
-
-async def get_active_auctions(limit: int = 20, offset: int = 0) -> list:
-    pool = await get_pool()
-    rows = await pool.fetch(
-        """SELECT a.*, g.gift_name, g.collection_name, g.gift_number,
-                  g.rarity, g.image_url, u.username as seller_username
-           FROM auctions a
-           JOIN gifts g ON a.gift_id=g.gift_id
-           JOIN users u ON a.seller_id=u.user_id
-           WHERE a.status='active' AND a.ends_at > NOW()
-           ORDER BY a.ends_at ASC LIMIT $1 OFFSET $2""",
-        limit, offset,
-    )
-    return [dict(r) for r in rows]
-
-
-async def get_auction(auction_id: int) -> Optional[dict]:
-    pool = await get_pool()
-    row = await pool.fetchrow(
-        """SELECT a.*, g.gift_name, g.collection_name, g.gift_number,
-                  g.rarity, g.image_url, g.owner_id,
-                  u.username as seller_username
-           FROM auctions a
-           JOIN gifts g ON a.gift_id=g.gift_id
-           JOIN users u ON a.seller_id=u.user_id
-           WHERE a.auction_id=$1""",
-        auction_id,
-    )
-    return dict(row) if row else None
-
-
-async def place_bid(auction_id: int, bidder_id: int, amount: float) -> bool:
-    pool = await get_pool()
-    async with pool.acquire() as con:
-        async with con.transaction():
-            auction = await con.fetchrow(
-                "SELECT status, current_price, min_step FROM auctions WHERE auction_id=$1",
-                auction_id,
-            )
-            if not auction or auction["status"] != "active":
-                return False
-            if amount < auction["current_price"] + auction["min_step"]:
-                return False
-            await con.execute(
-                "UPDATE auctions SET current_price=$1, current_bidder=$2 WHERE auction_id=$3",
-                amount, bidder_id, auction_id,
-            )
-            await con.execute(
-                "INSERT INTO bids (auction_id, bidder_id, amount) VALUES ($1,$2,$3)",
-                auction_id, bidder_id, amount,
-            )
-    return True
-
-
-async def end_auction(auction_id: int):
-    pool = await get_pool()
-    await pool.execute(
-        "UPDATE auctions SET status='ended' WHERE auction_id=$1", auction_id
     )
 
 
@@ -940,10 +864,6 @@ async def accept_trade_offer(offer_id: int, market_fee: float = 0.0) -> str:
             swapped_gift_ids = target_gift_ids + offered_gift_ids
             await con.execute(
                 "UPDATE listings SET status='cancelled' WHERE gift_id = ANY($1::bigint[]) AND status='active'",
-                swapped_gift_ids,
-            )
-            await con.execute(
-                "UPDATE auctions SET status='ended' WHERE gift_id = ANY($1::bigint[]) AND status='active'",
                 swapped_gift_ids,
             )
             await con.execute(
@@ -1436,13 +1356,11 @@ async def get_platform_stats() -> dict:
     pool = await get_pool()
     users = await pool.fetchval("SELECT COUNT(*) FROM users")
     listings = await pool.fetchval("SELECT COUNT(*) FROM listings WHERE status='active'")
-    auctions = await pool.fetchval("SELECT COUNT(*) FROM auctions WHERE status='active'")
     volume = await pool.fetchval("SELECT COALESCE(SUM(amount_ton),0) FROM transactions")
     fees = await pool.fetchval("SELECT COALESCE(SUM(fee_ton),0) FROM transactions")
     return {
         "users": users or 0,
         "active_listings": listings or 0,
-        "active_auctions": auctions or 0,
         "total_volume": float(volume or 0),
         "total_fees": float(fees or 0),
     }
@@ -1563,13 +1481,11 @@ async def set_gift_owner(gift_id: int, owner_id: Optional[int]):
 
 
 async def gift_is_locked(gift_id: int) -> bool:
-    """Гифт занят активным лотом, аукционом, обменом (в т.ч. как один из
-    нескольких подарков лота/оффера) — выводить/перевыставлять нельзя."""
+    """Гифт занят активным лотом или обменом (в т.ч. как один из нескольких
+    подарков лота/оффера) — выводить/перевыставлять нельзя."""
     pool = await get_pool()
     return await pool.fetchval(
         """SELECT EXISTS(SELECT 1 FROM listings
-                         WHERE gift_id=$1 AND status='active')
-               OR EXISTS(SELECT 1 FROM auctions
                          WHERE gift_id=$1 AND status='active')
                OR EXISTS(SELECT 1 FROM trade_listing_gifts tlg
                          JOIN trade_listings t ON tlg.trade_id=t.trade_id
@@ -1587,8 +1503,6 @@ async def get_gift_locks(gift_id: int) -> dict:
     pool = await get_pool()
     listings = [dict(r) for r in await pool.fetch(
         "SELECT listing_id, status FROM listings WHERE gift_id=$1 AND status='active'", gift_id)]
-    auctions = [dict(r) for r in await pool.fetch(
-        "SELECT auction_id, status FROM auctions WHERE gift_id=$1 AND status='active'", gift_id)]
     trade_listings_rows = [dict(r) for r in await pool.fetch(
         """SELECT t.trade_id, t.status FROM trade_listing_gifts tlg
            JOIN trade_listings t ON tlg.trade_id=t.trade_id
@@ -1598,7 +1512,7 @@ async def get_gift_locks(gift_id: int) -> dict:
            JOIN trade_offers o ON tog.offer_id=o.offer_id
            WHERE tog.gift_id=$1 AND o.status='pending'""", gift_id)]
     return {
-        "listings": listings, "auctions": auctions,
+        "listings": listings,
         "trade_listings": trade_listings_rows, "trade_offers": trade_offers_rows,
     }
 

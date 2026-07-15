@@ -8,8 +8,13 @@ from tonutils.contracts import WalletV5R1, NFTTransferBuilder
 
 logger = logging.getLogger(__name__)
 
-# Адрес сейфа (testnet, WalletV5R1) — эталон для сверки
-EXPECTED_ESCROW_ADDRESS = "0QA2-P0sWJofS2PuPFrDln3nyBNJhw2wddDwUhxSU1b0tmqS"
+# Эталон для сверки — TON_WALLET_ADDRESS, тот же адрес, что использует ton_client
+# для чтения баланса и транзакций. Раньше здесь была зашита testnet-форма сейфа,
+# и переключение TON_NETWORK=mainnet роняло приложение на старте: одна и та же
+# сид-фраза даёт один и тот же кошелёк в обеих сетях, но записывается он
+# по-разному (0Q…/kQ… в testnet, UQ…/EQ… в mainnet), и сверка не сходилась.
+# Источник истины теперь один — переменная окружения.
+EXPECTED_ESCROW_ADDRESS = os.getenv("TON_WALLET_ADDRESS", "").strip()
 
 _wallet = None
 
@@ -37,13 +42,22 @@ def get_escrow_wallet():
     wallet, _, _, _ = WalletV5R1.from_mnemonic(client, words)
 
     derived = wallet.address.to_str(is_bounceable=False, is_test_only=is_testnet)
+    if not EXPECTED_ESCROW_ADDRESS:
+        raise RuntimeError(
+            "TON_WALLET_ADDRESS не задан — не с чем сверить адрес из мнемоники. "
+            f"Кошелёк из ESCROW_MNEMONIC даёт {derived} (сеть: "
+            f"{'testnet' if is_testnet else 'mainnet'})."
+        )
     if derived != EXPECTED_ESCROW_ADDRESS:
         raise RuntimeError(
-            f"Адрес из мнемоники ({derived}) не совпадает с сейфом "
-            f"({EXPECTED_ESCROW_ADDRESS}). Проверь слова и версию кошелька."
+            f"Адрес из мнемоники ({derived}) не совпадает с TON_WALLET_ADDRESS "
+            f"({EXPECTED_ESCROW_ADDRESS}). Сеть: {'testnet' if is_testnet else 'mainnet'}. "
+            f"Проверь слова, версию кошелька и что адрес записан в форме этой сети "
+            f"(testnet — 0Q…, mainnet — UQ…)."
         )
 
-    logger.info("🔐 Эскроу-кошелёк инициализирован: %s", derived)
+    logger.info("🔐 Эскроу-кошелёк инициализирован: %s (сеть: %s)",
+                derived, "testnet" if is_testnet else "mainnet")
     _wallet = wallet
     return _wallet
 

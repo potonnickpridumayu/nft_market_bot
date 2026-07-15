@@ -1130,6 +1130,22 @@ async def admin_overview(x_admin_token: Optional[str] = Header(None)):
     return {"users": users, "gifts": gifts, "business_connections": conns}
 
 
+@app.get("/api/admin/db-tables")
+async def admin_db_tables(x_admin_token: Optional[str] = Header(None)):
+    """Таблицы и число строк в них. Прямого доступа к Postgres с локальной
+    машины нет (внутренний хост провайдера), а миграции идут через SCHEMA_SQL
+    на старте — без этой ручки нельзя убедиться, что миграция сделала то, что
+    задумано (NOTICE/WARNING из DO-блоков в наши логи не попадают)."""
+    _check_admin(x_admin_token)
+    pool = await get_pool()
+    names = [r["tablename"] for r in await pool.fetch(
+        "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename")]
+    out = {}
+    for n in names:
+        out[n] = await pool.fetchval(f'SELECT COUNT(*) FROM "{n}"')
+    return {"tables": out, "count": len(names)}
+
+
 @app.get("/api/admin/solvency")
 async def admin_solvency(x_admin_token: Optional[str] = Header(None)):
     """Платёжеспособность: покрывает ли сейф обязательства перед пользователями.

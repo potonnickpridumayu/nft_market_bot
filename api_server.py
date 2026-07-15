@@ -1130,6 +1130,63 @@ async def admin_overview(x_admin_token: Optional[str] = Header(None)):
     return {"users": users, "gifts": gifts, "business_connections": conns}
 
 
+class ResetForMainnetBody(BaseModel):
+    confirm: str
+
+
+@app.post("/api/admin/reset-for-mainnet")
+async def admin_reset_for_mainnet(
+        body: ResetForMainnetBody,
+        x_admin_token: Optional[str] = Header(None),
+):
+    """РАЗОВОЕ обнуление перед переходом на mainnet. Кнопка разрушительная,
+    поэтому просит точную фразу подтверждения.
+
+    ЗАЧЕМ. Балансы накоплены в testnet и обеспечены тестовыми монетами. В
+    mainnet тот же Gram на балансе — это требование на РЕАЛЬНЫЙ TON с сейфа,
+    которого под них нет. Плюс активные лоты стоят 25/60/90 Gram: в mainnet это
+    десятки настоящих TON, купить их невозможно, а висеть и вводить в
+    заблуждение они будут.
+
+    ЧТО ДЕЛАЕТ: обнуляет balance_ton и счётчики total_spent/total_earned; снимает
+    активные лоты и отклоняет висящие по ним офферы (как это делает покупка).
+    ЧЕГО НЕ ТРОГАЕТ: подарки, пользователей, историю сделок (transactions,
+    referral_payouts, withdrawals) — она остаётся архивом, денег не создаёт."""
+    _check_admin(x_admin_token)
+    if body.confirm != "ОБНУЛИТЬ ПЕРЕД MAINNET":
+        raise HTTPException(400, "Неверная фраза подтверждения — ничего не сделано")
+
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        async with con.transaction():
+            before = await con.fetchval("SELECT COALESCE(SUM(balance_ton),0) FROM users")
+            users_n = await con.fetchval(
+                "SELECT COUNT(*) FROM users WHERE balance_ton <> 0 "
+                "OR total_spent <> 0 OR total_earned <> 0")
+            await con.execute(
+                "UPDATE users SET balance_ton=0, total_spent=0, total_earned=0")
+
+            listing_ids = [r["listing_id"] for r in await con.fetch(
+                "SELECT listing_id FROM listings WHERE status='active' FOR UPDATE")]
+            if listing_ids:
+                await con.execute(
+                    "UPDATE listings SET status='cancelled' WHERE listing_id = ANY($1::bigint[])",
+                    listing_ids)
+                await con.execute(
+                    """UPDATE listing_offers SET status='declined', resolved_at=NOW()
+                       WHERE listing_id = ANY($1::bigint[]) AND status='pending'""",
+                    listing_ids)
+
+    logger.warning("RESET перед mainnet: обнулено %s юзеров (было %.4f Gram), "
+                   "снято лотов: %s", users_n, float(before or 0), len(listing_ids))
+    return {
+        "ok": True,
+        "balances_zeroed_total": float(before or 0),
+        "users_touched": users_n,
+        "listings_cancelled": listing_ids,
+    }
+
+
 @app.get("/api/admin/db-tables")
 async def admin_db_tables(x_admin_token: Optional[str] = Header(None)):
     """Таблицы и число строк в них. Прямого доступа к Postgres с локальной

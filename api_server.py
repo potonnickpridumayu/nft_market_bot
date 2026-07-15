@@ -965,9 +965,13 @@ async def withdraw_balance(
     if not user:
         raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
 
-    amount = round(body.amount, 2)
+    # 4 знака — точность реестра (round4 в queries.py, fmtGram на фронте).
+    # Было round(…, 2): вывод 1.2125 уходил как 1.21, остаток 0.0025 оседал на
+    # балансе неснимаемой пылью (меньше минимума вывести нельзя), а кнопка «Всё»
+    # никогда не выводила всё. Проверено вживую на выводе #9.
+    amount = round(body.amount, 4)
     if amount < MIN_WITHDRAW_TON:
-        raise HTTPException(400, f"Минимум для вывода — {MIN_WITHDRAW_TON} TON")
+        raise HTTPException(400, f"Минимум для вывода — {MIN_WITHDRAW_TON} Gram")
 
     to_address = body.to_address.strip()
     if not ADDR_RE.match(to_address):

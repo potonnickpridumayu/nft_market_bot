@@ -778,6 +778,24 @@ async def market_history():
 async def stats():
     return await get_platform_stats()
 
+@app.get("/api/escrow/address")
+async def escrow_address():
+    """Адрес сейфа для пополнения. Только из переменных, без похода в блокчейн:
+    ручку зовут перед КАЖДЫМ пополнением, и она не должна падать на лимитах TON
+    API (в отличие от /api/escrow/status, который тянет баланс и список NFT).
+
+    Заведена после того, как адрес сейфа оказался ЗАШИТ во фронте (Profile.jsx,
+    константа SAFE_ADDRESS со старым testnet-адресом): бэкенд переключили на
+    mainnet и новый сейф, а фронт продолжил слать деньги на старый адрес —
+    пополнение 0.12 TON ушло в никуда. Адрес должен быть в одном месте."""
+    if not ton_client.TON_WALLET_ADDRESS:
+        raise HTTPException(503, "Сервис временно недоступен — кошелёк-сейф не настроен")
+    return {
+        "address": ton_client.TON_WALLET_ADDRESS,
+        "network": ton_client.TON_NETWORK,
+    }
+
+
 @app.get("/api/escrow/status")
 async def escrow_status():
     return await ton_client.get_escrow_snapshot()

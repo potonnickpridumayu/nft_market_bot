@@ -59,6 +59,10 @@ from db.queries import (
 # Комиссия (GRAM) за вывод нативного TG-подарка — окупает 25 Stars трансфера
 GIFT_WITHDRAW_FEE: float = float(os.getenv("GIFT_WITHDRAW_FEE_TON", "0.25"))
 
+# Потолок цены лота (GRAM). Защита от опечатки в лишний ноль и от лотов-троллей.
+MAX_LISTING_PRICE: float = 100_000.0
+MAX_PRICE_ERROR = "Максимум 100 000 Gram за лот. Мать продаешь?"
+
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
@@ -245,6 +249,8 @@ async def create_listing_endpoint(
 
     if body.price <= 0:
         raise HTTPException(400, "Цена должна быть больше нуля")
+    if body.price > MAX_LISTING_PRICE:
+        raise HTTPException(400, MAX_PRICE_ERROR)
 
     # Новый путь: подарок уже задепозичен, создаём листинг по gift_id
     if body.gift_id:
@@ -1035,6 +1041,8 @@ async def change_listing_price(
         raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     if body.price <= 0:
         raise HTTPException(400, "Цена должна быть больше нуля")
+    if body.price > MAX_LISTING_PRICE:
+        raise HTTPException(400, MAX_PRICE_ERROR)
 
     listing = await get_listing(listing_id)
     if not listing:

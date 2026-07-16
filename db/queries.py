@@ -121,6 +121,17 @@ CREATE TABLE IF NOT EXISTS referral_payouts (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Пополнения баланса TON: суммы депозитов раньше нигде не сохранялись
+-- (escrow_events хранит только хеш) — пишем для истории профиля и отчётности.
+CREATE TABLE IF NOT EXISTS ton_deposits (
+    dep_id       BIGSERIAL PRIMARY KEY,
+    user_id      BIGINT NOT NULL,
+    amount_ton   DOUBLE PRECISION NOT NULL,
+    tx_hash      TEXT UNIQUE NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_ton_deposits_user ON ton_deposits(user_id);
+
 CREATE TABLE IF NOT EXISTS withdrawals (
     wd_id        BIGSERIAL PRIMARY KEY,
     user_id      BIGINT REFERENCES users(user_id),
@@ -1526,6 +1537,55 @@ async def get_gift_by_nft_address(nft_address: str) -> Optional[dict]:
     return dict(row) if row else None
 
 # ── Withdrawals (C-4) ─────────────────────────────────────────────────────────
+
+async def credit_ton_deposit(user_id: int, amount_ton: float, tx_hash: str) -> bool:
+    """Атомарно: записать пополнение + зачислить баланс + пометить событие.
+
+    Раньше зачисление шло двумя шагами (update_balance → mark_event_processed):
+    падение процесса между ними давало двойное зачисление при рестарте.
+    Уникальность tx_hash в ton_deposits делает операцию идемпотентной:
+    False — этот депозит уже зачислен."""
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        async with con.transaction():
+            dep_id = await con.fetchval(
+                """INSERT INTO ton_deposits (user_id, amount_ton, tx_hash)
+                   VALUES ($1,$2,$3) ON CONFLICT (tx_hash) DO NOTHING
+                   RETURNING dep_id""",
+                user_id, amount_ton, tx_hash)
+            if dep_id is None:
+                return False
+            await con.execute(
+                "UPDATE users SET balance_ton = balance_ton + $1 WHERE user_id=$2",
+                amount_ton, user_id)
+            await con.execute(
+                """INSERT INTO escrow_events (tx_hash, status) VALUES ($1, 'ton_deposit')
+                   ON CONFLICT (tx_hash) DO UPDATE SET status = EXCLUDED.status""",
+                tx_hash)
+    return True
+
+
+async def get_user_ton_deposits(user_id: int, limit: int = 25) -> list:
+    """Пополнения баланса — для истории сделок в профиле."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT amount_ton, created_at AS completed_at
+           FROM ton_deposits WHERE user_id=$1
+           ORDER BY created_at DESC LIMIT $2""",
+        user_id, limit)
+    return [dict(r) for r in rows]
+
+
+async def get_user_withdrawals(user_id: int, limit: int = 25) -> list:
+    """Выводы TON — для истории сделок в профиле (status: pending/sent/confirmed/refunded)."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT amount_ton, status, created_at AS completed_at
+           FROM withdrawals WHERE user_id=$1
+           ORDER BY created_at DESC LIMIT $2""",
+        user_id, limit)
+    return [dict(r) for r in rows]
+
 
 async def create_withdrawal(user_id: int, to_address: str, amount_ton: float) -> int:
     """Атомарно: списать баланс + создать запись pending. 0 — если не хватило средств."""

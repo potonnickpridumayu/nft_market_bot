@@ -29,6 +29,8 @@ from db.queries import (
     record_market_event, get_recent_market_events,
     # реферальные начисления в историю профиля:
     get_user_referral_payouts,
+    # пополнения/выводы TON в историю профиля:
+    get_user_ton_deposits, get_user_withdrawals,
     # для покупки:
     buy_listing_atomic,
     update_balance, transfer_gift, record_transaction,
@@ -735,6 +737,8 @@ async def profile(x_telegram_init_data: Optional[str] = Header(None)):
     txs = await get_user_transactions(user["id"], limit=25)
     trades = await get_user_completed_trades(user["id"], limit=25)
     refs = await get_user_referral_payouts(user["id"], limit=25)
+    deps = await get_user_ton_deposits(user["id"], limit=25)
+    wds = await get_user_withdrawals(user["id"], limit=25)
     total_deals = await get_user_deal_count(user["id"])
     for tx in txs:
         tx["kind"] = "sale"
@@ -742,7 +746,11 @@ async def profile(x_telegram_init_data: Optional[str] = Header(None)):
         tr["kind"] = "trade"
     for rp in refs:
         rp["kind"] = "ref"
-    history = sorted(txs + trades + refs,
+    for d in deps:
+        d["kind"] = "deposit"
+    for w in wds:
+        w["kind"] = "withdrawal"
+    history = sorted(txs + trades + refs + deps + wds,
                      key=lambda x: x["completed_at"], reverse=True)[:30]
     trade_offers = await get_user_trade_offers(user["id"])
     listing_offers = await get_user_listing_offers(user["id"])

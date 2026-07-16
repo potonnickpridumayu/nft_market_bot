@@ -38,7 +38,7 @@ from db.queries import (
     set_gift_tg_id,
     get_or_create_user,
     transfer_gift,
-    update_balance,
+    credit_ton_deposit,
     update_gift_meta,
     update_gift_tg_media,
 )
@@ -140,9 +140,9 @@ async def process_ton_deposits() -> None:
             logger.warning("⛔ Пополнение ниже минимума: %s TON от user %s", amount_ton, user_id)
             continue
 
-        await update_balance(user_id, amount_ton)
-        await mark_event_processed(tx_hash, "ton_deposit")
-        logger.info("💰 Пополнение: +%s TON → user %s (tx=%s)", amount_ton, user_id, tx_hash)
+        # атомарно: запись в ton_deposits + баланс + escrow_events одной транзакцией
+        if await credit_ton_deposit(user_id, amount_ton, tx_hash):
+            logger.info("💰 Пополнение: +%s TON → user %s (tx=%s)", amount_ton, user_id, tx_hash)
 
 # ── C-4: подтверждение исходящих выводов TON ──────────────────────────────────
 

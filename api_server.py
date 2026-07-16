@@ -62,7 +62,7 @@ GIFT_WITHDRAW_FEE: float = float(os.getenv("GIFT_WITHDRAW_FEE_TON", "0.25"))
 
 # Потолок цены лота (GRAM). Защита от опечатки в лишний ноль и от лотов-троллей.
 MAX_LISTING_PRICE: float = 100_000.0
-MAX_PRICE_ERROR = "Максимум 100 000 Gram за лот. Мать продаешь?"
+MAX_PRICE_ERROR = "Максимум 100 000 Gram за лот. Мать продаешь что ли?"
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -1192,102 +1192,6 @@ async def admin_overview(x_admin_token: Optional[str] = Header(None)):
     conns = [dict(r) for r in await pool.fetch(
         "SELECT * FROM business_connections ORDER BY updated_at DESC")]
     return {"users": users, "gifts": gifts, "business_connections": conns}
-
-
-class ResetForMainnetBody(BaseModel):
-    confirm: str
-
-
-@app.post("/api/admin/reset-for-mainnet")
-async def admin_reset_for_mainnet(
-        body: ResetForMainnetBody,
-        x_admin_token: Optional[str] = Header(None),
-):
-    """РАЗОВОЕ обнуление перед переходом на mainnet. Кнопка разрушительная,
-    поэтому просит точную фразу подтверждения.
-
-    ЗАЧЕМ. Балансы накоплены в testnet и обеспечены тестовыми монетами. В
-    mainnet тот же Gram на балансе — это требование на РЕАЛЬНЫЙ TON с сейфа,
-    которого под них нет. Плюс активные лоты стоят 25/60/90 Gram: в mainnet это
-    десятки настоящих TON, купить их невозможно, а висеть и вводить в
-    заблуждение они будут.
-
-    ЧТО ДЕЛАЕТ: обнуляет balance_ton и счётчики total_spent/total_earned; снимает
-    активные лоты и отклоняет висящие по ним офферы (как это делает покупка).
-    ЧЕГО НЕ ТРОГАЕТ: подарки, пользователей, историю сделок (transactions,
-    referral_payouts, withdrawals) — она остаётся архивом, денег не создаёт."""
-    _check_admin(x_admin_token)
-    if body.confirm != "ОБНУЛИТЬ ПЕРЕД MAINNET":
-        raise HTTPException(400, "Неверная фраза подтверждения — ничего не сделано")
-
-    pool = await get_pool()
-    async with pool.acquire() as con:
-        async with con.transaction():
-            before = await con.fetchval("SELECT COALESCE(SUM(balance_ton),0) FROM users")
-            users_n = await con.fetchval(
-                "SELECT COUNT(*) FROM users WHERE balance_ton <> 0 "
-                "OR total_spent <> 0 OR total_earned <> 0")
-            await con.execute(
-                "UPDATE users SET balance_ton=0, total_spent=0, total_earned=0")
-
-            listing_ids = [r["listing_id"] for r in await con.fetch(
-                "SELECT listing_id FROM listings WHERE status='active' FOR UPDATE")]
-            if listing_ids:
-                await con.execute(
-                    "UPDATE listings SET status='cancelled' WHERE listing_id = ANY($1::bigint[])",
-                    listing_ids)
-                await con.execute(
-                    """UPDATE listing_offers SET status='declined', resolved_at=NOW()
-                       WHERE listing_id = ANY($1::bigint[]) AND status='pending'""",
-                    listing_ids)
-
-    logger.warning("RESET перед mainnet: обнулено %s юзеров (было %.4f Gram), "
-                   "снято лотов: %s", users_n, float(before or 0), len(listing_ids))
-    return {
-        "ok": True,
-        "balances_zeroed_total": float(before or 0),
-        "users_touched": users_n,
-        "listings_cancelled": listing_ids,
-    }
-
-
-@app.post("/api/admin/reset-referral-earnings")
-async def admin_reset_referral_earnings(
-        body: ResetForMainnetBody,
-        x_admin_token: Optional[str] = Header(None),
-):
-    """Обнуляет «Заработано» на странице Рефералов, не трогая «Приглашено».
-
-    Две цифры берутся из разных мест (get_referral_stats): «Приглашено» — это
-    COUNT по users.referred_by, «Заработано» — SUM по referral_payouts. Поэтому
-    выплаты можно снести целиком, а приглашённые останутся на месте.
-
-    Нужно потому, что 0.105 Gram заработка — наследие testnet: реальных денег за
-    ним нет. Побочно из истории профиля исчезнут строки «Реферал @X продал…» —
-    это те же самые записи."""
-    _check_admin(x_admin_token)
-    if body.confirm != "ОБНУЛИТЬ ПЕРЕД MAINNET":
-        raise HTTPException(400, "Неверная фраза подтверждения — ничего не сделано")
-
-    pool = await get_pool()
-    async with pool.acquire() as con:
-        async with con.transaction():
-            row = await con.fetchrow(
-                "SELECT COUNT(*) AS n, COALESCE(SUM(amount_ton), 0) AS total FROM referral_payouts")
-            await con.execute("DELETE FROM referral_payouts")
-            invited = await con.fetch(
-                "SELECT referred_by, COUNT(*) AS n FROM users "
-                "WHERE referred_by IS NOT NULL GROUP BY referred_by")
-
-    logger.warning("RESET рефералов: удалено выплат %s на %.4f Gram",
-                   row["n"], float(row["total"]))
-    return {
-        "ok": True,
-        "payouts_deleted": row["n"],
-        "earnings_zeroed_total": float(row["total"]),
-        # Проверка, что приглашённые уцелели
-        "invited_still_counted": {str(r["referred_by"]): r["n"] for r in invited},
-    }
 
 
 @app.get("/api/admin/db-tables")

@@ -428,6 +428,10 @@ async def create_listing_offer_endpoint(
     min_amount = lst["price_ton"] * MIN_OFFER_FRACTION
     if body.amount_ton < min_amount:
         raise HTTPException(400, f"Оффер не может быть меньше {min_amount:.2f} Gram (50% цены)")
+    # Оффер — предложение цены НИЖЕ текущей. Платить >= цены лота бессмысленно
+    # (проще купить напрямую) — режем и на сервере, не только во фронте.
+    if body.amount_ton >= lst["price_ton"]:
+        raise HTTPException(400, f"Оффер должен быть меньше цены лота ({lst['price_ton']:.2f} Gram)")
 
     full_name = " ".join(p for p in [user.get("first_name"), user.get("last_name")] if p)
     db_user = await get_or_create_user(user["id"], user.get("username", ""), full_name)

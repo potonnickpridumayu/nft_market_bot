@@ -627,7 +627,7 @@ _GIFT_JSON = """json_build_object(
 
 _TRADE_LISTING_SELECT = f"""
     SELECT t.trade_id, t.owner_id, t.note, t.status, t.created_at,
-           u.username as owner_username,
+           u.username as owner_username, u.full_name as owner_name,
            (SELECT json_agg({_GIFT_JSON} ORDER BY g.gift_id)
             FROM trade_listing_gifts tlg JOIN gifts g ON g.gift_id=tlg.gift_id
             WHERE tlg.trade_id=t.trade_id) as gifts
@@ -1089,7 +1089,7 @@ async def get_user_listing_offers(user_id: int) -> dict:
     pool = await get_pool()
     incoming = await pool.fetch(
         """SELECT o.*, l.price_ton, g.gift_name, g.gift_number, g.nft_address,
-                  u.username as from_username
+                  u.username as from_username, u.full_name as from_name
            FROM listing_offers o
            JOIN listings l ON o.listing_id = l.listing_id
            JOIN gifts g ON l.gift_id = g.gift_id
@@ -1100,7 +1100,7 @@ async def get_user_listing_offers(user_id: int) -> dict:
     )
     outgoing = await pool.fetch(
         """SELECT o.*, l.price_ton, g.gift_name, g.gift_number, g.nft_address,
-                  u.username as to_username
+                  u.username as to_username, u.full_name as to_name
            FROM listing_offers o
            JOIN listings l ON o.listing_id = l.listing_id
            JOIN gifts g ON l.gift_id = g.gift_id

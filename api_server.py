@@ -56,7 +56,7 @@ from db.queries import (
     create_listing_offer, get_listing_offer, get_user_listing_offers,
     decline_listing_offer, cancel_listing_offer, accept_listing_offer,
     # завершённые обмены для истории сделок:
-    get_user_completed_trades, get_user_deal_count,
+    get_user_completed_trades, get_user_deal_count, get_and_mark_unseen_swaps,
 )
 
 # Комиссия (GRAM) за вывод нативного TG-подарка — окупает 25 Stars трансфера
@@ -652,6 +652,18 @@ async def my_trade_offers(x_telegram_init_data: Optional[str] = Header(None)):
     if not user:
         raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
     return await get_user_trade_offers(user["id"])
+
+
+@app.get("/api/trades/swaps/unseen")
+async def unseen_swaps(x_telegram_init_data: Optional[str] = Header(None)):
+    """Завершённые обмены, которые пользователю ещё не проигрывали анимацией.
+    Возвращает и СРАЗУ помечает показанными — второй раз тот же обмен не придёт.
+    Клиент проигрывает свежайший при заходе/на опросе (второй участник и/или
+    тот, у кого приложение было закрыто в момент принятия)."""
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
+    return await get_and_mark_unseen_swaps(user["id"])
 
 
 @app.post("/api/trades/offers/{offer_id}/accept")

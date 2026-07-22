@@ -57,6 +57,9 @@ from db.queries import (
     decline_listing_offer, cancel_listing_offer, accept_listing_offer,
     # завершённые обмены для истории сделок:
     get_user_completed_trades, get_user_deal_count, get_and_mark_unseen_swaps,
+    # ордеры (заявки на покупку):
+    create_order, get_order, get_active_orders, get_orders_for_gift,
+    get_user_orders, cancel_order, fulfill_order_atomic,
 )
 
 # Комиссия (GRAM) за вывод нативного TG-подарка — окупает 25 Stars трансфера
@@ -517,6 +520,128 @@ async def cancel_listing_offer_endpoint(
     if not ok:
         raise HTTPException(404, "Предложение не найдено или принадлежит не вам")
     return {"ok": True}
+
+
+# ===== ОРДЕРЫ (ЗАЯВКИ НА ПОКУПКУ) =====
+
+class CreateOrderBody(BaseModel):
+    kind: str                      # 'collection' | 'gift'
+    gift_name: str
+    gift_number: str = ""
+    collection_name: str = ""
+    amount_ton: float
+
+
+@app.post("/api/orders")
+async def create_order_endpoint(
+    body: CreateOrderBody,
+    x_telegram_init_data: Optional[str] = Header(None),
+):
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
+    kind = body.kind if body.kind in ("collection", "gift") else "collection"
+    name = (body.gift_name or "").strip()
+    if not name:
+        raise HTTPException(400, "Не указан подарок для ордера")
+    if kind == "gift" and not (body.gift_number or "").strip():
+        raise HTTPException(400, "Для ордера на конкретный подарок нужен номер")
+    if body.amount_ton <= 0:
+        raise HTTPException(400, "Сумма ордера должна быть больше нуля")
+
+    full_name = " ".join(p for p in [user.get("first_name"), user.get("last_name")] if p)
+    await get_or_create_user(user["id"], user.get("username", ""), full_name)
+
+    err, order_id = await create_order(
+        user["id"], kind, name, (body.gift_number or "").strip(),
+        (body.collection_name or "").strip(), body.amount_ton)
+    if err:
+        raise HTTPException(400, err)
+    return {"ok": True, "order_id": order_id}
+
+
+@app.get("/api/orders")
+async def list_orders(limit: int = Query(100, le=200)):
+    items = await get_active_orders(limit=limit)
+    return {"orders": items}
+
+
+@app.get("/api/orders/mine")
+async def my_orders(x_telegram_init_data: Optional[str] = Header(None)):
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
+    items = await get_user_orders(user["id"])
+    return {"orders": items}
+
+
+@app.get("/api/orders/for-gift/{gift_id}")
+async def orders_for_gift(gift_id: int, x_telegram_init_data: Optional[str] = Header(None)):
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
+    gift = await get_gift(gift_id)
+    if not gift or gift["owner_id"] != user["id"]:
+        raise HTTPException(403, "Это не ваш подарок")
+    items = await get_orders_for_gift(gift_id)
+    return {"orders": items}
+
+
+class FulfillOrderBody(BaseModel):
+    gift_id: int
+
+
+@app.post("/api/orders/{order_id}/fulfill")
+async def fulfill_order_endpoint(
+    order_id: int,
+    body: FulfillOrderBody,
+    x_telegram_init_data: Optional[str] = Header(None),
+):
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
+    full_name = " ".join(p for p in [user.get("first_name"), user.get("last_name")] if p)
+    await get_or_create_user(user["id"], user.get("username", ""), full_name)
+
+    err, res = await fulfill_order_atomic(
+        order_id, user["id"], body.gift_id, MARKET_FEE, REFERRAL_BONUS_PERCENT)
+    if err:
+        raise HTTPException(400, err)
+
+    num = res.get("gift_number")
+    gift_line = f"{res['gift_name']}" + (f" #{num}" if num else "")
+    seller_name = user.get("username") or user.get("first_name") or "продавец"
+    await notify_seller(
+        res["buyer_id"],
+        f"🎁 <b>Ваш ордер исполнен!</b>\n\n{gift_line}\n"
+        f"Списано: {res['amount']:.4f} Gram\nПродавец: @{seller_name}")
+    await notify_seller(
+        res["seller_id"],
+        f"✅ <b>Вы исполнили ордер!</b>\n\n{gift_line}\n"
+        f"Вы получили: {res['seller_net']:.4f} Gram")
+
+    return {
+        "ok": True,
+        "gift_name": res["gift_name"],
+        "gift_number": res.get("gift_number", ""),
+        "amount": res["amount"],
+        "fee": res["fee"],
+        "seller_net": res["seller_net"],
+    }
+
+
+@app.post("/api/orders/{order_id}/cancel")
+async def cancel_order_endpoint(
+    order_id: int,
+    x_telegram_init_data: Optional[str] = Header(None),
+):
+    user = get_user_from_header(x_telegram_init_data or "")
+    if not user:
+        raise HTTPException(401, "Требуется авторизация — откройте приложение в Telegram")
+    err, refunded = await cancel_order(order_id, user["id"])
+    if err:
+        raise HTTPException(400, err)
+    return {"ok": True, "refunded": refunded}
 
 
 # ===== ОБМЕН (TRADES) =====

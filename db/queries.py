@@ -276,6 +276,31 @@ CREATE TABLE IF NOT EXISTS market_events (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_market_events_created ON market_events(created_at DESC);
+
+-- Ордеры (заявки на покупку): заказчик морозит сумму (обычно ниже флора) на
+-- подарок; владелец такого подарка может быстро ИСПОЛНИТЬ ордер — деньги ему,
+-- подарок заказчику. kind='collection' — любой подарок этого типа (матчинг по
+-- gift_name); kind='gift' — конкретный gift_name+gift_number. Сумма
+-- замораживается с баланса заказчика при создании (эскроу), возвращается при
+-- отмене. Комиссия 3% удерживается с исполнителя-продавца при исполнении.
+CREATE TABLE IF NOT EXISTS orders (
+    order_id        BIGSERIAL PRIMARY KEY,
+    buyer_id        BIGINT REFERENCES users(user_id),
+    kind            TEXT NOT NULL,                  -- 'collection' | 'gift'
+    gift_name       TEXT NOT NULL,                  -- тип подарка (цель матчинга)
+    gift_number     TEXT NOT NULL DEFAULT '',       -- для kind='gift' — конкретный номер
+    collection_name TEXT NOT NULL DEFAULT '',       -- для отображения
+    amount_ton      DOUBLE PRECISION NOT NULL,      -- заморожено с баланса заказчика
+    fee_ton         DOUBLE PRECISION NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'active', -- active/filled/cancelled
+    filled_by       BIGINT REFERENCES users(user_id),
+    filled_gift_id  BIGINT REFERENCES gifts(gift_id),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_orders_status   ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_orders_giftname ON orders(gift_name);
+CREATE INDEX IF NOT EXISTS idx_orders_buyer    ON orders(buyer_id);
 """
 
 
@@ -1695,3 +1720,199 @@ async def refund_stale_withdrawals(grace_minutes: int = 15) -> list:
                         r["amount_ton"], r["user_id"])
                     refunded.append(dict(r))
     return refunded
+
+
+# ── Ордеры (заявки на покупку) ────────────────────────────────────────────────
+
+async def create_order(buyer_id: int, kind: str, gift_name: str, gift_number: str,
+                       collection_name: str, amount: float):
+    """Создаёт ордер и МОРОЗИТ сумму с баланса заказчика (эскроу). Возвращает
+    (error, order_id). Списание атомарное — только если хватает баланса."""
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        async with con.transaction():
+            row = await con.fetchrow(
+                """UPDATE users SET balance_ton = balance_ton - $1
+                   WHERE user_id = $2 AND balance_ton >= $1 - 0.000001
+                   RETURNING user_id""",
+                amount, buyer_id)
+            if row is None:
+                return "Недостаточно средств для ордера", None
+            order_id = await con.fetchval(
+                """INSERT INTO orders (buyer_id, kind, gift_name, gift_number,
+                   collection_name, amount_ton)
+                   VALUES ($1,$2,$3,$4,$5,$6) RETURNING order_id""",
+                buyer_id, kind, gift_name, gift_number or "", collection_name or "", amount)
+    return "", order_id
+
+
+async def get_order(order_id: int) -> Optional[dict]:
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT * FROM orders WHERE order_id=$1", order_id)
+    return dict(row) if row else None
+
+
+async def get_active_orders(limit: int = 100) -> list:
+    """Активные ордеры для витрины «спроса» — по убыванию суммы."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT o.*, u.username AS buyer_username
+           FROM orders o LEFT JOIN users u ON u.user_id = o.buyer_id
+           WHERE o.status='active'
+           ORDER BY o.amount_ton DESC, o.created_at DESC
+           LIMIT $1""", limit)
+    return [dict(r) for r in rows]
+
+
+async def get_orders_for_gift(gift_id: int) -> list:
+    """Активные ордеры, которые владелец gift_id может исполнить своим подарком.
+    Матчинг по gift_name; для kind='gift' ещё и по номеру. Свои ордеры исключены
+    (нельзя исполнить собственный). По убыванию суммы."""
+    pool = await get_pool()
+    g = await pool.fetchrow(
+        "SELECT owner_id, gift_name, gift_number FROM gifts WHERE gift_id=$1", gift_id)
+    if not g:
+        return []
+    rows = await pool.fetch(
+        """SELECT o.*, u.username AS buyer_username
+           FROM orders o LEFT JOIN users u ON u.user_id = o.buyer_id
+           WHERE o.status='active'
+             AND o.buyer_id IS DISTINCT FROM $1
+             AND o.gift_name = $2
+             AND (o.kind='collection' OR (o.kind='gift' AND o.gift_number = $3))
+           ORDER BY o.amount_ton DESC, o.created_at ASC""",
+        g["owner_id"], g["gift_name"], g["gift_number"] or "")
+    return [dict(r) for r in rows]
+
+
+async def get_user_orders(user_id: int, limit: int = 50) -> list:
+    """Ордеры заказчика (активные вперёд)."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT * FROM orders WHERE buyer_id=$1
+           ORDER BY (status='active') DESC, created_at DESC LIMIT $2""",
+        user_id, limit)
+    return [dict(r) for r in rows]
+
+
+async def cancel_order(order_id: int, buyer_id: int):
+    """Отменяет активный ордер и ВОЗВРАЩАЕТ заморозку. Возвращает
+    (error, refunded_amount). Статус-гард защищает от двойного возврата."""
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        async with con.transaction():
+            o = await con.fetchrow(
+                "SELECT * FROM orders WHERE order_id=$1 FOR UPDATE", order_id)
+            if not o:
+                return "Ордер не найден", None
+            if o["buyer_id"] != buyer_id:
+                return "Это не ваш ордер", None
+            if o["status"] != "active":
+                return "Ордер уже закрыт", None
+            await con.execute(
+                "UPDATE orders SET status='cancelled', resolved_at=NOW() WHERE order_id=$1",
+                order_id)
+            await con.execute(
+                "UPDATE users SET balance_ton = balance_ton + $1 WHERE user_id=$2",
+                o["amount_ton"], buyer_id)
+    return "", o["amount_ton"]
+
+
+async def fulfill_order_atomic(order_id: int, seller_id: int, gift_id: int,
+                               market_fee: float, referral_bonus_percent: float):
+    """Продавец исполняет ордер своим подарком. Атомарно: подарок → заказчику,
+    замороженная сумма (− комиссия) → продавцу. Возвращает (error, result).
+
+    Деньги заказчика уже заморожены при создании ордера — здесь его баланс не
+    трогаем, только начисляем продавцу (amount − fee) и рефереру. Денежная
+    математика и порядок локов зеркалят buy_listing_atomic."""
+    pool = await get_pool()
+    async with pool.acquire() as con:
+        async with con.transaction():
+            o = await con.fetchrow(
+                "SELECT * FROM orders WHERE order_id=$1 FOR UPDATE", order_id)
+            if not o or o["status"] != "active":
+                return "Ордер недоступен — уже исполнен или отменён", None
+            buyer_id = o["buyer_id"]
+            if buyer_id == seller_id:
+                return "Нельзя исполнить собственный ордер", None
+
+            g = await con.fetchrow(
+                "SELECT * FROM gifts WHERE gift_id=$1 FOR UPDATE", gift_id)
+            if not g:
+                return "Подарок не найден", None
+            if g["owner_id"] != seller_id:
+                return "Это не ваш подарок", None
+            if g["gift_name"] != o["gift_name"]:
+                return "Подарок не подходит под ордер", None
+            if o["kind"] == "gift" and (g["gift_number"] or "") != (o["gift_number"] or ""):
+                return "Подарок не подходит под ордер", None
+
+            locked = await con.fetchval(
+                """SELECT EXISTS(SELECT 1 FROM listings WHERE gift_id=$1 AND status='active')
+                       OR EXISTS(SELECT 1 FROM trade_listing_gifts tlg
+                                 JOIN trade_listings t ON tlg.trade_id=t.trade_id
+                                 WHERE tlg.gift_id=$1 AND t.status='active')
+                       OR EXISTS(SELECT 1 FROM trade_offer_gifts tog
+                                 JOIN trade_offers ofr ON tog.offer_id=ofr.offer_id
+                                 WHERE tog.gift_id=$1 AND ofr.status='pending')""",
+                gift_id)
+            if locked:
+                return "Подарок занят активным лотом или обменом — снимите его сначала", None
+
+            amount = o["amount_ton"]
+            fee = amount * market_fee
+            seller_net = amount - fee
+
+            # лок обеих сторон по возрастанию id (как в buy_listing_atomic)
+            first, second = sorted((buyer_id, seller_id))
+            rows = {r["user_id"]: r for r in await con.fetch(
+                "SELECT user_id, balance_ton, referred_by FROM users "
+                "WHERE user_id = ANY($1::bigint[]) ORDER BY user_id FOR UPDATE",
+                [first, second])}
+            seller = rows.get(seller_id)
+            if not seller:
+                return "Продавец не найден", None
+
+            ref_bonus = 0.0
+            referrer = seller["referred_by"]
+            if referrer and referrer != buyer_id and referrer != seller_id:
+                ref_bonus = amount * referral_bonus_percent
+            else:
+                referrer = None
+
+            await con.execute(
+                "UPDATE users SET balance_ton = balance_ton + $1, total_earned = total_earned + $1 WHERE user_id=$2",
+                seller_net, seller_id)
+            await con.execute(
+                "UPDATE gifts SET owner_id=$1, acquired_at=NOW() WHERE gift_id=$2",
+                buyer_id, gift_id)
+            await con.execute(
+                "UPDATE users SET total_spent = total_spent + $1 WHERE user_id=$2",
+                amount, buyer_id)
+            await con.execute(
+                """UPDATE orders SET status='filled', filled_by=$1, filled_gift_id=$2,
+                   fee_ton=$3, resolved_at=NOW() WHERE order_id=$4""",
+                seller_id, gift_id, fee, order_id)
+
+            tx_id = await con.fetchval(
+                """INSERT INTO transactions
+                   (buyer_id, seller_id, gift_id, amount_ton, fee_ton, ref_bonus_ton, source, source_id)
+                   VALUES ($1,$2,$3,$4,$5,$6,'order',$7) RETURNING tx_id""",
+                buyer_id, seller_id, gift_id, amount, fee, ref_bonus, order_id)
+
+            if ref_bonus > 0 and referrer:
+                await con.execute(
+                    "UPDATE users SET balance_ton = balance_ton + $1 WHERE user_id=$2",
+                    ref_bonus, referrer)
+                await con.execute(
+                    """INSERT INTO referral_payouts (referrer_id, from_user_id, tx_id, amount_ton)
+                       VALUES ($1,$2,$3,$4)""",
+                    referrer, seller_id, tx_id, ref_bonus)
+
+    return "", {
+        "order_id": order_id, "buyer_id": buyer_id, "seller_id": seller_id,
+        "gift_id": gift_id, "amount": amount, "fee": fee, "seller_net": seller_net,
+        "gift_name": g["gift_name"], "gift_number": g["gift_number"],
+        "tx_id": tx_id, "ref_bonus": ref_bonus, "referrer_id": referrer,
+    }

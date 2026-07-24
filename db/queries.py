@@ -305,6 +305,14 @@ CREATE INDEX IF NOT EXISTS idx_orders_buyer    ON orders(buyer_id);
 -- Ордер по скину: '' = любой скин коллекции, иначе матч только с этим model_name.
 -- Аддитивно к уже существующей на проде таблице orders.
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS model_name TEXT NOT NULL DEFAULT '';
+
+-- Кэш каталога атрибутов коллекции с Fragment (все скины/фоны/символы +
+-- редкость + картинки). Обновляется лениво по запросу, TTL проверяется в коде.
+CREATE TABLE IF NOT EXISTS gift_catalog (
+    slug        TEXT PRIMARY KEY,
+    data        JSONB NOT NULL,
+    fetched_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 """
 
 
@@ -320,6 +328,33 @@ async def close_pool():
     if _pool is not None:
         await _pool.close()
         _pool = None
+
+
+# ── Каталог атрибутов коллекций (Fragment) ──────────────────────────────────
+
+async def get_cached_catalog(slug: str) -> Optional[dict]:
+    """Кэш каталога коллекции: {data, age_seconds} или None, если нет."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT data, EXTRACT(EPOCH FROM (NOW() - fetched_at)) AS age FROM gift_catalog WHERE slug=$1",
+        slug,
+    )
+    if not row:
+        return None
+    data = row["data"]
+    if isinstance(data, str):
+        data = json.loads(data)
+    return {"data": data, "age_seconds": float(row["age"])}
+
+
+async def upsert_catalog(slug: str, data: dict) -> None:
+    """Сохранить/обновить каталог коллекции, обновив метку времени."""
+    pool = await get_pool()
+    await pool.execute(
+        """INSERT INTO gift_catalog (slug, data, fetched_at) VALUES ($1, $2, NOW())
+           ON CONFLICT (slug) DO UPDATE SET data = EXCLUDED.data, fetched_at = NOW()""",
+        slug, json.dumps(data),
+    )
 
 
 # ── Users ────────────────────────────────────────────────────────────────────

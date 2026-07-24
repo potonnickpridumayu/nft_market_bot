@@ -8,6 +8,7 @@ import re
 import asyncio
 import ton_client
 import deposits
+import fragment_catalog
 import logging
 import urllib.request
 from typing import Optional, List
@@ -21,6 +22,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 from db.queries import (
+    get_cached_catalog, upsert_catalog,
     get_active_listings, get_listing, get_user_gifts, get_user,
     get_or_create_user, create_listing, add_gift,
     get_user_transactions, get_platform_stats,
@@ -922,6 +924,35 @@ async def market_history():
     history = sorted(txs + trades + events,
                      key=lambda x: x["completed_at"], reverse=True)[:60]
     return {"history": history}
+
+
+# ===== КАТАЛОГ АТРИБУТОВ КОЛЛЕКЦИИ (Fragment) =====
+
+CATALOG_TTL_SECONDS = 24 * 3600  # каталог меняется медленно — обновляем раз в сутки
+
+
+@app.get("/api/catalog/{slug}")
+async def collection_catalog(slug: str):
+    """Полный каталог атрибутов коллекции (все скины/фоны/символы + редкость +
+    картинки) с Fragment. Публичная ручка. Кэш в БД с суточным TTL; при сбое
+    Fragment отдаём устаревший кэш, если он есть."""
+    slug = fragment_catalog.slugify(slug)
+    if not slug:
+        raise HTTPException(status_code=404, detail="Коллекция не найдена")
+
+    cached = await get_cached_catalog(slug)
+    if cached and cached["age_seconds"] < CATALOG_TTL_SECONDS:
+        return {"slug": slug, **cached["data"]}
+
+    fresh = await fragment_catalog.fetch_catalog(slug)
+    if fresh:
+        await upsert_catalog(slug, fresh)
+        return {"slug": slug, **fresh}
+
+    # Fragment недоступен/пусто — отдаём устаревший кэш, если есть
+    if cached:
+        return {"slug": slug, **cached["data"]}
+    raise HTTPException(status_code=404, detail="Каталог коллекции недоступен")
 
 
 # ===== STATS =====

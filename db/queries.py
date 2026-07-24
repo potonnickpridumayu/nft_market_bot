@@ -289,6 +289,7 @@ CREATE TABLE IF NOT EXISTS orders (
     kind            TEXT NOT NULL,                  -- 'collection' | 'gift'
     gift_name       TEXT NOT NULL,                  -- тип подарка (цель матчинга)
     gift_number     TEXT NOT NULL DEFAULT '',       -- для kind='gift' — конкретный номер
+    model_name      TEXT NOT NULL DEFAULT '',       -- для ордера по скину: '' = любой скин коллекции
     collection_name TEXT NOT NULL DEFAULT '',       -- для отображения
     amount_ton      DOUBLE PRECISION NOT NULL,      -- заморожено с баланса заказчика
     fee_ton         DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -301,6 +302,9 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE INDEX IF NOT EXISTS idx_orders_status   ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_giftname ON orders(gift_name);
 CREATE INDEX IF NOT EXISTS idx_orders_buyer    ON orders(buyer_id);
+-- Ордер по скину: '' = любой скин коллекции, иначе матч только с этим model_name.
+-- Аддитивно к уже существующей на проде таблице orders.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS model_name TEXT NOT NULL DEFAULT '';
 """
 
 
@@ -1724,10 +1728,25 @@ async def refund_stale_withdrawals(grace_minutes: int = 15) -> list:
 
 # ── Ордеры (заявки на покупку) ────────────────────────────────────────────────
 
+def _gift_model_name(gift_row) -> str:
+    """Достаёт скин (model_name) подарка из его tg_backdrop JSON. '' если нет."""
+    if not gift_row:
+        return ""
+    tb = gift_row.get("tg_backdrop") if isinstance(gift_row, dict) else None
+    if not tb:
+        return ""
+    try:
+        return (json.loads(tb) or {}).get("model_name", "") or ""
+    except Exception:
+        return ""
+
+
 async def create_order(buyer_id: int, kind: str, gift_name: str, gift_number: str,
-                       collection_name: str, amount: float):
+                       collection_name: str, amount: float, model_name: str = ""):
     """Создаёт ордер и МОРОЗИТ сумму с баланса заказчика (эскроу). Возвращает
-    (error, order_id). Списание атомарное — только если хватает баланса."""
+    (error, order_id). Списание атомарное — только если хватает баланса.
+    model_name (только для kind='collection'): '' = любой скин, иначе ордер
+    исполнит лишь подарок этой коллекции с этим скином."""
     pool = await get_pool()
     async with pool.acquire() as con:
         async with con.transaction():
@@ -1740,9 +1759,10 @@ async def create_order(buyer_id: int, kind: str, gift_name: str, gift_number: st
                 return "Недостаточно средств для ордера", None
             order_id = await con.fetchval(
                 """INSERT INTO orders (buyer_id, kind, gift_name, gift_number,
-                   collection_name, amount_ton)
-                   VALUES ($1,$2,$3,$4,$5,$6) RETURNING order_id""",
-                buyer_id, kind, gift_name, gift_number or "", collection_name or "", amount)
+                   collection_name, amount_ton, model_name)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING order_id""",
+                buyer_id, kind, gift_name, gift_number or "", collection_name or "", amount,
+                (model_name or "") if kind == "collection" else "")
     return "", order_id
 
 
@@ -1766,13 +1786,15 @@ async def get_active_orders(limit: int = 100) -> list:
 
 async def get_orders_for_gift(gift_id: int) -> list:
     """Активные ордеры, которые владелец gift_id может исполнить своим подарком.
-    Матчинг по gift_name; для kind='gift' ещё и по номеру. Свои ордеры исключены
-    (нельзя исполнить собственный). По убыванию суммы."""
+    Матчинг по gift_name; для kind='gift' ещё и по номеру; ордер по скину
+    (model_name != '') подходит только если скин подарка совпадает. Свои ордеры
+    исключены (нельзя исполнить собственный). По убыванию суммы."""
     pool = await get_pool()
     g = await pool.fetchrow(
-        "SELECT owner_id, gift_name, gift_number FROM gifts WHERE gift_id=$1", gift_id)
+        "SELECT owner_id, gift_name, gift_number, tg_backdrop FROM gifts WHERE gift_id=$1", gift_id)
     if not g:
         return []
+    gift_model = _gift_model_name(dict(g))
     rows = await pool.fetch(
         """SELECT o.*, u.username AS buyer_username
            FROM orders o LEFT JOIN users u ON u.user_id = o.buyer_id
@@ -1780,8 +1802,9 @@ async def get_orders_for_gift(gift_id: int) -> list:
              AND o.buyer_id IS DISTINCT FROM $1
              AND o.gift_name = $2
              AND (o.kind='collection' OR (o.kind='gift' AND o.gift_number = $3))
+             AND (o.model_name = '' OR o.model_name = $4)
            ORDER BY o.amount_ton DESC, o.created_at ASC""",
-        g["owner_id"], g["gift_name"], g["gift_number"] or "")
+        g["owner_id"], g["gift_name"], g["gift_number"] or "", gift_model)
     return [dict(r) for r in rows]
 
 
@@ -1847,6 +1870,9 @@ async def fulfill_order_atomic(order_id: int, seller_id: int, gift_id: int,
                 return "Подарок не подходит под ордер", None
             if o["kind"] == "gift" and (g["gift_number"] or "") != (o["gift_number"] or ""):
                 return "Подарок не подходит под ордер", None
+            # Ордер по скину: подарок должен быть именно этого скина.
+            if (o["model_name"] or "") and _gift_model_name(dict(g)) != o["model_name"]:
+                return "Подарок не подходит под ордер — нужен скин «%s»" % o["model_name"], None
 
             locked = await con.fetchval(
                 """SELECT EXISTS(SELECT 1 FROM listings WHERE gift_id=$1 AND status='active')

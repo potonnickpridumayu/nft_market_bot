@@ -529,6 +529,7 @@ class CreateOrderBody(BaseModel):
     gift_name: str
     gift_number: str = ""
     collection_name: str = ""
+    model_name: str = ""           # для kind='collection': '' = любой скин, иначе конкретный
     amount_ton: float
 
 
@@ -554,7 +555,8 @@ async def create_order_endpoint(
 
     err, order_id = await create_order(
         user["id"], kind, name, (body.gift_number or "").strip(),
-        (body.collection_name or "").strip(), body.amount_ton)
+        (body.collection_name or "").strip(), body.amount_ton,
+        (body.model_name or "").strip())
     if err:
         raise HTTPException(400, err)
     return {"ok": True, "order_id": order_id}
@@ -1357,6 +1359,25 @@ async def admin_db_tables(x_admin_token: Optional[str] = Header(None)):
     for n in names:
         out[n] = await pool.fetchval(f'SELECT COUNT(*) FROM "{n}"')
     return {"tables": out, "count": len(names)}
+
+
+@app.get("/api/admin/dump-all")
+async def admin_dump_all(x_admin_token: Optional[str] = Header(None)):
+    """ВРЕМЕННО: полный дамп всех таблиц (бэкап перед риском удаления БД Railway).
+    Прямой внешний коннект к Postgres заблокирован (proxy-порт недоступен), а
+    приложение видит БД по внутреннему хосту — снимаем дамп через него. Защищено
+    админ-токеном. Удалить после снятия бэкапа."""
+    _check_admin(x_admin_token)
+    pool = await get_pool()
+    names = [r["tablename"] for r in await pool.fetch(
+        "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename")]
+    data, counts = {}, {}
+    for n in names:
+        rows = await pool.fetch(f'SELECT * FROM "{n}"')
+        data[n] = [dict(r) for r in rows]
+        counts[n] = len(rows)
+    taken_at = await pool.fetchval("SELECT NOW()")
+    return {"taken_at": taken_at, "row_counts": counts, "data": data}
 
 
 @app.get("/api/admin/solvency")
